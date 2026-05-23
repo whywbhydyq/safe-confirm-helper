@@ -164,6 +164,18 @@ ${FINAL_FORMAT}`;
   function buttonPatterns() { return settings.english ? ZH.concat(EN) : ZH; }
   function buttonMatch(el) { const label = text(el); return !!label && buttonPatterns().some((pattern) => pattern.test(label)); }
   function score(el) { const label = text(el); let n = 0; if (/确认|confirm/i.test(label)) n += 5; if (/批准|approve/i.test(label)) n += 4; if (/允许|allow/i.test(label)) n += 3; if (/继续|continue/i.test(label)) n += 2; if (el.closest(DLG)) n += 6; return n; }
+  function inlineApproval(el) {
+    const label = text(el);
+    if (!/^(确认|批准|允许|Confirm|Approve|Allow|Accept)$/i.test(label)) return false;
+    let root = el.parentElement;
+    for (let depth = 0; root && depth < 5; depth += 1, root = root.parentElement) {
+      const buttons = Array.from(root.querySelectorAll(BTN)).filter(visible);
+      if (buttons.length < 2 || buttons.length > 6) continue;
+      const labels = buttons.map(text).join(" ");
+      if (/拒绝|取消|deny|reject|decline|cancel/i.test(labels) && /确认|批准|允许|confirm|approve|allow|accept/i.test(labels)) return true;
+    }
+    return false;
+  }
   function clearMark() { const el = document.querySelector('[data-safe-confirm-helper-highlight="true"]'); if (!el) return; el.style.outline = el.dataset.safeConfirmHelperOldOutline || ""; el.style.outlineOffset = el.dataset.safeConfirmHelperOldOutlineOffset || ""; el.removeAttribute("data-safe-confirm-helper-highlight"); }
   function mark() { if (!settings.highlight || !candidate) return; candidate.dataset.safeConfirmHelperOldOutline = candidate.style.outline; candidate.dataset.safeConfirmHelperOldOutlineOffset = candidate.style.outlineOffset; candidate.setAttribute("data-safe-confirm-helper-highlight", "true"); candidate.style.outline = "2px solid #22c55e"; candidate.style.outlineOffset = "3px"; }
   function setCandidate(button, autoClickable = false) { if (candidate === button && candidateAutoClickable === autoClickable) return; clearMark(); candidate = button; candidateAutoClickable = !!autoClickable; if (!button) clicked = new WeakSet(); mark(); }
@@ -181,8 +193,8 @@ ${FINAL_FORMAT}`;
         if (value > bestScore) { best = button; bestScore = value; }
       }
     }
-    scanInfo = { roots: roots.length, candidates: total, matches, autoClickable: !!autoClickable };
-    setCandidate(best, !!best && autoClickable);
+    scanInfo = { roots: roots.length, candidates: total, matches, autoClickable: !!(best && (autoClickable || inlineApproval(best))) };
+    setCandidate(best, !!best && (autoClickable || inlineApproval(best)));
     autoClick();
     return best;
   }
@@ -337,14 +349,14 @@ ${FINAL_FORMAT}`;
   }
 
   function scrollBottom() { if (Date.now() - lastUserScroll < settings.userScrollPauseMs) return; programmaticScrollUntil = Date.now() + 500; scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight); Array.from(document.querySelectorAll("main,[role='main'],[class*='scroll'],[data-testid*='conversation'],div")).filter((el) => visible(el) && el.scrollHeight - el.clientHeight > 80).sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight)).slice(0, 4).forEach((el) => { el.scrollTop = el.scrollHeight; }); }
-  function assist() { if (!settings.enabled) return; if (task.active && task.promptInjected && settings.keepAtBottom) scrollBottom(); if (settings.autoContinue) maybeContinue(); }
+  function assist() { if (!settings.enabled) return; if (settings.keepAtBottom) scrollBottom(); if (settings.autoContinue) maybeContinue(); }
   function requestAssist() { if (document.visibilityState === "hidden") { const now = Date.now(); if (now - lastHiddenAssist < 500) return; lastHiddenAssist = now; assist(); return; } if (assistTimer) return; assistTimer = delay(() => { assistTimer = 0; assist(); }, 350); }
   function own(node) { return node instanceof Element && (node.id === `${APP_ID}-toast` || node.closest?.(`#${APP_ID}-panel`) || node.classList?.contains("safe-confirm-final-toggle")); }
   function ownMut(mutation) { if (own(mutation.target)) return true; const nodes = [...mutation.addedNodes, ...mutation.removedNodes]; return nodes.length > 0 && nodes.every(own); }
   function candidateMayChange(el, deep = false) { return el instanceof Element && (el.matches(BTN) || el.matches(DLG) || el.closest(DLG) || ((deep || el.childElementCount <= 80) && el.querySelector(`${BTN},${DLG}`))); }
   function scanMut(mutation) { if (ownMut(mutation)) return false; if (mutation.type === "characterData") return !!mutation.target.parentElement?.closest(BTN); if (mutation.type === "attributes") return candidateMayChange(mutation.target); return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => candidateMayChange(node, true)); }
   function assistMut(mutation) { if (ownMut(mutation) || !settings.enabled || (!settings.keepAtBottom && !settings.autoContinue)) return false; const may = (node) => node instanceof Element && (node.matches("main,article,form,textarea,[contenteditable='true'],[data-message-author-role]") || node.closest("main,article,form,[data-message-author-role]") || (node.childElementCount <= 120 && node.querySelector("article,form,textarea,[contenteditable='true'],[data-message-author-role]"))); return mutation.type === "attributes" ? may(mutation.target) : (mutation.type === "characterData" ? [mutation.target.parentElement] : [...mutation.addedNodes, ...mutation.removedNodes]).some(may); }
-  function loops() { clearTimer(scanLoop); clearTimer(assistLoop); if (settings.enabled && task.active && settings.autoConfirm) scanLoop = every(scan, 1000); if (settings.enabled && task.active && (settings.keepAtBottom || settings.autoContinue)) assistLoop = every(assist, 1500); }
+  function loops() { clearTimer(scanLoop); clearTimer(assistLoop); if (settings.enabled && settings.autoConfirm) scanLoop = every(scan, 1000); if (settings.enabled && (settings.keepAtBottom || settings.autoContinue)) assistLoop = every(assist, 1500); }
 
   function state() { return { connected: true, enabled: settings.enabled, candidateText: candidate ? text(candidate) : "", scanInfo: { ...scanInfo, autoClickable: candidateAutoClickable }, automation: { ...runtime, maxContinueCount: settings.maxContinueCount }, task: { ...task, finalValid: task.lastGateReason === "valid_final", hasFinal: !!task.lastFinal }, settings: { ...settings } }; }
   function popup(msg, _sender, sendResponse) { if (msg?.source !== `${APP_ID}-popup`) return false; (async () => { if (msg.action === "confirm") manualClick(); else if (msg.action === "rescan") scan(); else if (msg.action === "reset-task") { resetTask("manual_reset"); loops(); } else if (msg.action === "takeover-current") await startCurrentSupervision(); else if (msg.action === "set-setting" && Object.prototype.hasOwnProperty.call(DEF, msg.key)) { const value = msg.valueType === "number" ? Number(msg.value) : msg.valueType === "string" ? String(msg.value ?? "") : Boolean(msg.value); settings = cleanSettings({ ...settings, [msg.key]: value }); if ((msg.key === "enabled" || msg.key === "autoContinue") && !value) runtime.externalSignals = blankSignals(); if ((msg.key === "enabled" || msg.key === "autoContinue") && value) { runtime.pausedReason = ""; runtime.externalSignals = blankSignals(); } await saveSettings(); await saveSession(); loops(); requestScan(); requestAssist(); } else if (msg.action === "get-state") scan(); sendResponse(state()); })().catch(() => sendResponse(state())); return true; }
