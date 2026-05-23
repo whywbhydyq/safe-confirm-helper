@@ -1,15 +1,48 @@
 const DEFAULT_CONTINUE_PROMPT = "继续原始任务。优先处理未完成、未验证或有风险的部分。不要总结；不要只说“任务已完成”。若确认全部完成，输出 SCH_FINAL，否则继续执行。";
 const CONTENT_SCRIPT_FILES = ["content.js", "sch-final-enhancements.js"];
-const ids = { status: "page-status", taskState: "task-state", taskReason: "task-reason", continueCount: "continue-count", finalState: "final-state", candidate: "candidate-text", scanInfo: "scan-info", confirm: "confirm-btn", rescan: "rescan-btn", resetTask: "reset-task-btn", autoConfirm: "auto-confirm-input", keepAtBottom: "keep-bottom-input", autoContinue: "auto-continue-input", supervise: "supervise-input", enabled: "enabled-input", english: "english-input", highlight: "highlight-input", maxContinue: "max-continue-input", cooldown: "cooldown-input", auditEvery: "audit-every-input", continuePrompt: "continue-prompt-input", promptState: "prompt-state", resetPrompt: "reset-prompt-btn" };
+const ids = {
+  status: "page-status",
+  connectionPill: "connection-pill",
+  taskState: "task-state",
+  taskReason: "task-reason",
+  continueCount: "continue-count",
+  finalState: "final-state",
+  candidate: "candidate-text",
+  scanInfo: "scan-info",
+  primaryAction: "primary-action-btn",
+  confirm: "confirm-btn",
+  rescan: "rescan-btn",
+  resetTask: "reset-task-btn",
+  autoConfirm: "auto-confirm-input",
+  keepAtBottom: "keep-bottom-input",
+  autoContinue: "auto-continue-input",
+  supervise: "supervise-input",
+  enabled: "enabled-input",
+  english: "english-input",
+  highlight: "highlight-input",
+  maxContinue: "max-continue-input",
+  cooldown: "cooldown-input",
+  auditEvery: "audit-every-input",
+  continuePrompt: "continue-prompt-input",
+  promptState: "prompt-state",
+  resetPrompt: "reset-prompt-btn"
+};
 const el = Object.fromEntries(Object.entries(ids).map(([key, id]) => [key, document.getElementById(id)]));
 let activeTabId = null;
 let connected = false;
 let promptTimer = 0;
 let numberTimer = 0;
+let primaryMode = "pause";
 
-async function tab() { const [active] = await chrome.tabs.query({ active: true, currentWindow: true }); return active; }
+async function tab() {
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return active;
+}
 function ok(t) { return /^https:\/\/(chatgpt\.com|chat\.openai\.com)(\/|$)/.test(t?.url || ""); }
-async function send(action, payload = {}) { if (!activeTabId) throw new Error("没有当前标签页"); return chrome.tabs.sendMessage(activeTabId, { source: "safe-confirm-helper-popup", action, ...payload }); }
+async function send(action, payload = {}) {
+  if (!activeTabId) throw new Error("没有当前标签页");
+  return chrome.tabs.sendMessage(activeTabId, { source: "safe-confirm-helper-popup", action, ...payload });
+}
 async function connect(t) {
   try { return await send("get-state"); }
   catch {
@@ -19,20 +52,101 @@ async function connect(t) {
     return send("get-state");
   }
 }
-function disabled(value) { [el.confirm, el.rescan, el.resetTask, el.autoConfirm, el.keepAtBottom, el.autoContinue, el.supervise, el.enabled, el.english, el.highlight, el.maxContinue, el.cooldown, el.auditEvery, el.continuePrompt, el.resetPrompt].forEach((node) => { if (node) node.disabled = value; }); }
-function taskLabel(s) { if (!s.settings.superviseLongTasks) return "监督已关闭"; if (s.task.status === "stopped_valid_final") return "已停止：合格 Final"; if (!s.task.active) return "普通模式"; if (s.task.status === "auditing") return "审计中"; if (s.task.status === "continuing") return "继续中"; if (s.task.status?.startsWith("paused")) return "已暂停"; return "监督中"; }
-function reason(s) { if (s.automation.pausedReason) return s.automation.pausedReason; if (s.task.stopReason) return s.task.stopReason; if (s.task.lastGateReason) return `最后门控：${s.task.lastGateReason}`; return s.task.active ? "等待合格 SCH_FINAL" : "普通短对话不介入"; }
+function disabled(value) {
+  [el.primaryAction, el.confirm, el.rescan, el.resetTask, el.autoConfirm, el.keepAtBottom, el.autoContinue, el.supervise, el.enabled, el.english, el.highlight, el.maxContinue, el.cooldown, el.auditEvery, el.continuePrompt, el.resetPrompt].forEach((node) => { if (node) node.disabled = value; });
+}
+function setPill(text, cls = "") {
+  el.connectionPill.textContent = text;
+  el.connectionPill.className = `pill ${cls}`.trim();
+}
+function mapGateReason(reason) {
+  const map = {
+    missing_final: "AI 还没有完成最终自检",
+    missing_status: "最终自检缺少状态字段",
+    missing_covered: "最终自检缺少覆盖说明",
+    missing_proof: "最终自检缺少完成证据",
+    missing_unverified: "最终自检缺少未验证项说明",
+    missing_risks: "最终自检缺少风险说明",
+    missing_verdict: "最终自检缺少停止结论",
+    status_not_done: "AI 尚未声明任务完成",
+    verdict_not_ready: "AI 尚未确认可以停止",
+    unverified_exists: "AI 仍声明有未验证项",
+    blocking_risk_exists: "AI 仍声明有阻塞风险",
+    risk_word_exists: "最终自检里仍有不确定表述",
+    blocking_keyword_in_final: "最终自检里仍有阻塞风险词",
+    weak_risk_keyword_in_final: "最终自检里仍有不确定表述",
+    valid_final: "AI 已完成最终自检"
+  };
+  return map[reason] || reason || "等待页面状态";
+}
+function mapStopReason(reason) {
+  const map = {
+    manual_user_prompt: "检测到你输入了新问题，已退出旧任务",
+    conversation_changed: "已切换会话，旧任务已停止",
+    manual_reset: "当前任务已重置"
+  };
+  if (!reason) return "";
+  if (reason.includes("合格 SCH_FINAL")) return "AI 已完成最终自检，插件已停止继续";
+  return map[reason] || reason;
+}
+function mapPaused(reason, status) {
+  if (status === "paused_max_continue" || /最大自动继续次数|安全上限/.test(reason || "")) return "已达到安全上限，已暂停";
+  if (status === "paused_send_failed" || /无法发送|发送失败/.test(reason || "")) return "多次发送失败，已暂停";
+  if (status === "paused_composer_failed" || /找不到输入框|写入输入框/.test(reason || "")) return "找不到输入框，已暂停";
+  return reason || "已暂停";
+}
+function taskLabel(s) {
+  if (!s.settings.enabled) return "插件已暂停";
+  if (!s.settings.superviseLongTasks) return "监督已关闭";
+  if (s.task.status === "stopped_valid_final") return "已完成";
+  if (s.task.status?.startsWith("paused") || s.automation.pausedReason) return "已暂停";
+  if (s.task.active) return "正在监督长任务";
+  return "普通模式";
+}
+function reason(s) {
+  if (!s.settings.enabled) return "插件总开关已关闭，不会执行自动操作";
+  if (!s.settings.autoContinue) return "自动继续已暂停；需要时可一键恢复";
+  if (s.automation.pausedReason || s.task.status?.startsWith("paused")) return mapPaused(s.automation.pausedReason, s.task.status);
+  const stop = mapStopReason(s.task.stopReason);
+  if (stop) return stop;
+  if (s.task.lastGateReason) return mapGateReason(s.task.lastGateReason);
+  return s.task.active ? "AI 还没有完成最终自检" : "短问题不会触发长任务监督";
+}
+function finalLabel(s) {
+  if (s.task.finalValid) return "最终自检通过";
+  if (s.task.hasFinal) return "最终自检未通过";
+  return "等待最终自检";
+}
+function updatePrimary(s) {
+  el.primaryAction.className = "primary";
+  if (!s.settings.enabled) {
+    primaryMode = "enable";
+    el.primaryAction.textContent = "启用插件";
+    el.primaryAction.classList.add("enable");
+    return;
+  }
+  if (!s.settings.autoContinue || s.automation.pausedReason || s.task.status?.startsWith("paused")) {
+    primaryMode = "resume";
+    el.primaryAction.textContent = "恢复自动继续";
+    el.primaryAction.classList.add("resume");
+    return;
+  }
+  primaryMode = "pause";
+  el.primaryAction.textContent = "暂停自动继续";
+}
 function render(s) {
   connected = true;
   disabled(false);
-  el.status.textContent = s.settings.enabled ? "已连接当前页面" : "插件已暂停";
+  el.status.textContent = s.settings.enabled ? "已连接 ChatGPT" : "插件已暂停";
+  setPill(s.settings.enabled ? "已连接" : "已暂停", s.settings.enabled ? "ok" : "paused");
   el.taskState.textContent = taskLabel(s);
   el.taskReason.textContent = reason(s);
-  el.continueCount.textContent = `${s.automation.continueCount || 0} / ${s.settings.maxContinueCount || 50}`;
-  el.finalState.textContent = s.task.finalValid ? "合格" : s.task.hasFinal ? "不合格" : "未检测";
-  el.candidate.textContent = s.candidateText || "未发现候选";
-  const autoText = s.scanInfo.autoClickable === false ? " · 仅高亮" : s.scanInfo.autoClickable === true ? " · 可自动点" : "";
-  el.scanInfo.textContent = `范围 ${s.scanInfo.roots} · 按钮 ${s.scanInfo.candidates} · 匹配 ${s.scanInfo.matches}${autoText}`;
+  el.continueCount.textContent = `已自动继续 ${s.automation.continueCount || 0} 次`;
+  el.finalState.textContent = finalLabel(s);
+  const autoConfirmText = s.settings.autoConfirm ? "安全确认：已开启" : "安全确认：已关闭";
+  el.candidate.textContent = autoConfirmText;
+  const autoText = s.scanInfo.autoClickable === false ? "仅高亮，不自动点" : s.scanInfo.autoClickable === true ? "弹窗按钮可自动点" : "等待扫描";
+  el.scanInfo.textContent = `${autoText} · 匹配 ${s.scanInfo.matches || 0} 个候选`;
   el.enabled.checked = !!s.settings.enabled;
   el.supervise.checked = !!s.settings.superviseLongTasks;
   el.autoConfirm.checked = !!s.settings.autoConfirm;
@@ -43,14 +157,68 @@ function render(s) {
   el.maxContinue.value = s.settings.maxContinueCount || 50;
   el.cooldown.value = s.settings.continueCooldownMs || 10000;
   el.auditEvery.value = s.settings.auditEvery || 3;
-  if (document.activeElement !== el.continuePrompt) { el.continuePrompt.value = s.settings.continuePrompt || DEFAULT_CONTINUE_PROMPT; el.promptState.textContent = "已同步"; }
+  if (document.activeElement !== el.continuePrompt) {
+    el.continuePrompt.value = s.settings.continuePrompt || DEFAULT_CONTINUE_PROMPT;
+    el.promptState.textContent = "已同步";
+  }
+  updatePrimary(s);
 }
-function disconnected(message) { connected = false; disabled(true); el.status.textContent = message; el.taskState.textContent = "不可用"; el.taskReason.textContent = "请打开 ChatGPT 页面后刷新"; el.continueCount.textContent = "-"; el.finalState.textContent = "-"; el.candidate.textContent = "-"; el.scanInfo.textContent = "请打开匹配站点后刷新页面"; el.promptState.textContent = "未连接"; }
-async function refresh() { try { const t = await tab(); activeTabId = t?.id || null; if (!activeTabId) return disconnected("没有找到当前标签页"); render(await connect(t)); } catch { disconnected("当前页面不匹配或无法注入脚本"); } }
-async function run(action, payload) { if (!connected) return null; try { const s = await send(action, payload); if (s) render(s); return s; } catch { disconnected("连接已断开，请刷新页面"); return null; } }
-function bool(key, value) { run("set-setting", { key, value }); }
+function disconnected(message) {
+  connected = false;
+  disabled(true);
+  el.status.textContent = message;
+  setPill("不可用", "bad");
+  el.taskState.textContent = "不可用";
+  el.taskReason.textContent = "请打开 ChatGPT 页面后刷新";
+  el.continueCount.textContent = "-";
+  el.finalState.textContent = "-";
+  el.candidate.textContent = "安全确认：不可用";
+  el.scanInfo.textContent = "请打开匹配站点后刷新页面";
+  el.promptState.textContent = "未连接";
+}
+async function refresh() {
+  try {
+    const t = await tab();
+    activeTabId = t?.id || null;
+    if (!activeTabId) return disconnected("没有找到当前标签页");
+    render(await connect(t));
+  } catch {
+    disconnected("当前页面不匹配或无法注入脚本");
+  }
+}
+async function run(action, payload) {
+  if (!connected) return null;
+  try {
+    const s = await send(action, payload);
+    if (s) render(s);
+    return s;
+  } catch {
+    disconnected("连接已断开，请刷新页面");
+    return null;
+  }
+}
+function bool(key, value) { return run("set-setting", { key, value }); }
 function num(key, value) { clearTimeout(numberTimer); numberTimer = setTimeout(() => run("set-setting", { key, value, valueType: "number" }), 350); }
-function savePrompt(now = false) { clearTimeout(promptTimer); const commit = async () => { el.promptState.textContent = "保存中..."; const s = await run("set-setting", { key: "continuePrompt", value: el.continuePrompt.value, valueType: "string" }); el.promptState.textContent = s ? "已保存" : "保存失败"; }; if (now) return commit(); el.promptState.textContent = "未保存"; promptTimer = setTimeout(commit, 600); }
+function savePrompt(now = false) {
+  clearTimeout(promptTimer);
+  const commit = async () => {
+    el.promptState.textContent = "保存中...";
+    const s = await run("set-setting", { key: "continuePrompt", value: el.continuePrompt.value, valueType: "string" });
+    el.promptState.textContent = s ? "已保存" : "保存失败";
+  };
+  if (now) return commit();
+  el.promptState.textContent = "未保存";
+  promptTimer = setTimeout(commit, 600);
+}
+async function primaryAction() {
+  if (!connected) return;
+  if (primaryMode === "enable") await bool("enabled", true);
+  else if (primaryMode === "resume") {
+    await bool("enabled", true);
+    await bool("autoContinue", true);
+  } else await bool("autoContinue", false);
+}
+el.primaryAction.addEventListener("click", primaryAction);
 el.confirm.addEventListener("click", () => run("confirm"));
 el.rescan.addEventListener("click", () => run("rescan"));
 el.resetTask.addEventListener("click", () => run("reset-task"));
