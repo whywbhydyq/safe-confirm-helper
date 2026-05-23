@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Safe Confirm Helper",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "ChatGPT 长任务自验证监督插件：通过 SCH_FINAL 停机门控减少提前停止、漏做和假完成。",
   "permissions": ["activeTab", "scripting", "storage"],
   "icons": {
@@ -26,7 +26,7 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["content.js", "sch-enhancements.js"],
       "run_at": "document_idle"
     }
   ]
