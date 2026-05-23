@@ -151,11 +151,12 @@
     const currentHash = hash(raw);
     if (currentHash === lastHash) return;
     const currentSig = signature(raw);
+    const hasRisk = riskHard(raw) || riskWeak(raw);
     if (lastSig && currentSig && (currentSig === lastSig || currentSig.includes(lastSig) || sim(lastSig, currentSig) >= 0.88)) staleCount += 1;
     else staleCount = 0;
     lastSig = currentSig;
     lastHash = currentHash;
-    if (staleCount >= 2 && Date.now() - lastAuditAt > 30000) sendAudit();
+    if ((hasRisk || staleCount >= 2) && Date.now() - lastAuditAt > 30000) sendAudit();
   }
 
   function tick() { tickTimer = 0; foldFinals(); progressAudit(); }
