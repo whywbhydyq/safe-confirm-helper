@@ -12,11 +12,11 @@ unverified: none
 risks: none
 verdict: ready_to_stop
 </SCH_FINAL>`;
-  const CONTINUE = `继续原始任务。优先处理未完成、未验证或有风险的部分。不要总结；不要只说“任务已完成”。若确认全部完成，只输出以下格式，不要添加其他文字：
+  const CONTINUE = `继续执行原始任务，从当前进度后的下一个具体步骤开始。优先处理未完成、未验证或有阻塞风险的部分；不要复述计划，不要阶段性总结，不要只说“任务已完成”。如果发现遗漏、未验证项或阻塞风险，先继续执行或修复。只有确认全部完成且无未验证项、无阻塞风险时，才只输出以下格式，不要添加其他文字：
 ${FINAL_FORMAT}`;
-  const AUDIT = `先不要结束。现在做最终自检：1. 原始需求是否有遗漏？2. 哪些完成声明缺少证据？3. 哪些只是推测而非验证？4. 是否还有阻塞风险？如果出现风险词，请明确它是阻塞风险还是非阻塞风险；如有任何阻塞项，继续修复；只有没有遗漏和未验证项时，才只输出以下格式，不要添加其他文字：
+  const AUDIT = `先不要结束。现在只做停机前自检，并按顺序回答：1. 原始需求是否全部覆盖？2. 已完成声明分别有什么证据？3. 哪些内容只是推测而非验证？4. 是否存在未完成项、未验证项或阻塞风险？如果有任何未完成、未验证或阻塞风险，不要输出 SCH_FINAL，继续执行或修复。只有确认无遗漏、无未验证项、无阻塞风险时，才只输出以下格式，不要添加其他文字：
 ${FINAL_FORMAT}`;
-  const SUPERVISE = `[SafeConfirm Supervision]\n本任务按长任务处理。不要用一句“任务已完成”结束。\n执行时优先完成原始需求；停止前必须自检是否有遗漏、未验证项和阻塞风险。\n如果仍有未完成、未验证项或阻塞风险，继续执行。\n如果确认可以结束，只输出以下格式，不要添加其他文字：\n${FINAL_FORMAT}`;
+  const SUPERVISE = `[SafeConfirm Supervision]\n本轮是受监督的长任务。先执行用户的原始需求，不要一开始就做最终自检，也不要用一句“任务已完成”结束。\n执行过程中：优先推进实际任务；遇到未完成、未验证或阻塞风险时继续处理；不要把阶段性总结当作完成。\n准备停止前：必须自检原始需求覆盖情况、完成证据、未验证项和残余风险。\n只有确认无遗漏、无未验证项、无阻塞风险时，才只输出以下格式，不要添加其他文字：\n${FINAL_FORMAT}`;
   const DEF = { enabled: true, autoConfirm: true, keepAtBottom: true, autoContinue: true, superviseLongTasks: true, english: true, highlight: true, continuePrompt: CONTINUE, maxContinueCount: 50, continueCooldownMs: 10000, auditEvery: 3, userScrollPauseMs: 12000 };
   const ZH = [/^确认$/, /^允许$/, /^继续$/, /^批准$/, /确认/, /允许/, /批准/, /继续/];
   const EN = [/^Confirm$/i, /^Approve$/i, /^Allow$/i, /^Continue$/i, /^Accept$/i, /\bConfirm\b/i, /\bApprove\b/i, /\bAllow\b/i, /\bContinue\b/i, /\bAccept\b/i];
@@ -85,7 +85,8 @@ ${FINAL_FORMAT}`;
   }
 
   function legacyContinuePrompt(value) {
-    return /输出\s*SCH_FINAL/.test(String(value || "")) && !/<SCH_FINAL>/i.test(String(value || ""));
+    const text = String(value || "");
+    return (/输出\s*SCH_FINAL/.test(text) && !/<SCH_FINAL>/i.test(text)) || /不要总结；不要只说/.test(text) || /继续原始任务。优先处理未完成、未验证或有风险/.test(text);
   }
 
   async function loadSettings() {
