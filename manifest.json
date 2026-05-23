@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Safe Confirm Helper",
+  "version": "1.8.2",
+  "description": "在可信网页上，默认自动确认匹配按钮，支持保持底部、自动继续、自定义继续提示词和轻量扫描。",
+  "permissions": ["activeTab", "scripting"],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Safe Confirm Helper",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
