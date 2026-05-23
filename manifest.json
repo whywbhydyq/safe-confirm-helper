@@ -26,23 +26,7 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": [
-        "src/shared/constants.js",
-        "src/shared/text.js",
-        "src/content/dom-utils.js",
-        "src/content/settings-store.js",
-        "src/content/button-scanner.js",
-        "src/content/composer.js",
-        "src/content/assistant-detector.js",
-        "src/content/long-task-detector.js",
-        "src/content/supervision-prompts.js",
-        "src/content/final-parser.js",
-        "src/content/task-controller.js",
-        "src/content/automation-loop.js",
-        "src/content/public-state.js",
-        "src/content/cleanup.js",
-        "content.js"
-      ],
+      "js": ["content.js"],
       "run_at": "document_idle"
     }
   ]
