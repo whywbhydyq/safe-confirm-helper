@@ -1,4 +1,10 @@
 const DEFAULT_CONTINUE_PROMPT = "继续原始任务。优先处理未完成、未验证或有风险的部分。不要总结；不要只说“任务已完成”。若确认全部完成，输出 SCH_FINAL，否则继续执行。";
+const TAKEOVER_PROMPT = `请从现在开始接管当前对话，并按长任务监督模式处理。
+请先回顾本对话已有上下文，找出尚未完成、未验证或有风险的部分，然后继续推进。
+不要只说“任务已完成”，也不要只做总结。
+每次准备停止前，必须先自检是否存在遗漏、未验证项和阻塞风险。
+如果仍有未完成、未验证或有风险的部分，继续执行。
+如果确认可以结束，只输出 SCH_FINAL 块，说明覆盖项、证据、未验证项和风险。`;
 const CONTENT_SCRIPT_FILES = ["content.js", "sch-final-enhancements.js"];
 const ids = {
   status: "page-status",
@@ -32,7 +38,7 @@ let activeTabId = null;
 let connected = false;
 let promptTimer = 0;
 let numberTimer = 0;
-let primaryMode = "pause";
+let primaryMode = "start";
 
 async function tab() {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -100,17 +106,17 @@ function taskLabel(s) {
   if (!s.settings.superviseLongTasks) return "监督已关闭";
   if (s.task.status === "stopped_valid_final") return "已完成";
   if (s.task.status?.startsWith("paused") || s.automation.pausedReason) return "已暂停";
-  if (s.task.active) return "正在监督长任务";
+  if (s.task.active) return "正在监督当前对话";
   return "普通模式";
 }
 function reason(s) {
-  if (!s.settings.enabled) return "插件总开关已关闭，不会执行自动操作";
-  if (!s.settings.autoContinue) return "自动继续已暂停；需要时可一键恢复";
+  if (!s.settings.enabled) return "点击按钮后会启用插件并只接管当前页面";
+  if (!s.settings.autoContinue && s.task.active) return "自动继续已暂停；需要时可一键恢复";
   if (s.automation.pausedReason || s.task.status?.startsWith("paused")) return mapPaused(s.automation.pausedReason, s.task.status);
   const stop = mapStopReason(s.task.stopReason);
   if (stop) return stop;
   if (s.task.lastGateReason) return mapGateReason(s.task.lastGateReason);
-  return s.task.active ? "AI 还没有完成最终自检" : "短问题不会触发长任务监督";
+  return s.task.active ? "AI 还没有完成最终自检" : "点击“开始监督当前对话”后才会介入本页";
 }
 function finalLabel(s) {
   if (s.task.finalValid) return "最终自检通过";
@@ -119,9 +125,9 @@ function finalLabel(s) {
 }
 function updatePrimary(s) {
   el.primaryAction.className = "primary";
-  if (!s.settings.enabled) {
-    primaryMode = "enable";
-    el.primaryAction.textContent = "启用插件";
+  if (!s.settings.enabled || !s.task.active || s.task.status === "stopped_valid_final") {
+    primaryMode = "start";
+    el.primaryAction.textContent = !s.settings.enabled ? "启用并监督当前对话" : s.task.status === "stopped_valid_final" ? "重新监督当前对话" : "开始监督当前对话";
     el.primaryAction.classList.add("enable");
     return;
   }
@@ -210,9 +216,82 @@ function savePrompt(now = false) {
   el.promptState.textContent = "未保存";
   promptTimer = setTimeout(commit, 600);
 }
+function startSupervisionInPage(prompt) {
+  const INPUTS = "#prompt-textarea,textarea,[contenteditable='true']";
+  const BTNS = "button,[role='button'],input[type='button'],input[type='submit']";
+  const visible = (el) => {
+    if (!el || !el.isConnected) return false;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0" || style.pointerEvents === "none") return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= innerHeight && rect.left <= innerWidth;
+  };
+  const getText = (el) => !el ? "" : ("value" in el ? String(el.value || "") : String(el.textContent || "")).trim();
+  const setText = (el, value) => {
+    el.focus();
+    if ("value" in el) {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+      setter ? setter.call(el, value) : el.value = value;
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    const selection = getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("insertText", false, value);
+    }
+    if (getText(el) !== value) el.textContent = value;
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    return getText(el) === value;
+  };
+  const label = (el) => [el?.getAttribute?.("aria-label"), el?.getAttribute?.("title"), el?.textContent, el?.innerText].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  const editor = Array.from(document.querySelectorAll(INPUTS)).filter(visible).find((el) => !el.closest("#safe-confirm-helper-panel"));
+  if (!editor) return { ok: false, reason: "找不到输入框" };
+  if (getText(editor)) return { ok: false, reason: "输入框已有内容，未覆盖" };
+  if (!setText(editor, prompt)) return { ok: false, reason: "无法写入输入框" };
+  setTimeout(() => {
+    const root = editor.closest?.("form") || document;
+    const sendButton = [
+      "button[data-testid='send-button']",
+      "button[aria-label*='发送']",
+      "button[aria-label*='Send']",
+      "button[title*='发送']",
+      "button[title*='Send']",
+      "button[type='submit']"
+    ].map((selector) => root.querySelector(selector)).find((button) => button && visible(button) && !button.disabled && button.getAttribute("aria-disabled") !== "true") ||
+      Array.from(root.querySelectorAll(BTNS)).filter(visible).find((button) => /发送|send/i.test(label(button)) && !button.disabled && button.getAttribute("aria-disabled") !== "true");
+    if (sendButton) sendButton.click();
+  }, 120);
+  return { ok: true };
+}
+async function startCurrentConversation() {
+  if (!activeTabId || !chrome.scripting?.executeScript) return false;
+  el.primaryAction.disabled = true;
+  el.primaryAction.textContent = "正在发送监督提示...";
+  await bool("enabled", true);
+  await bool("superviseLongTasks", true);
+  await bool("autoContinue", true);
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: activeTabId },
+    func: startSupervisionInPage,
+    args: [TAKEOVER_PROMPT]
+  });
+  if (!result?.result?.ok) {
+    el.taskReason.textContent = result?.result?.reason || "无法发送监督提示";
+    el.primaryAction.disabled = false;
+    updatePrimary(await send("get-state"));
+    return false;
+  }
+  setTimeout(refresh, 900);
+  return true;
+}
 async function primaryAction() {
   if (!connected) return;
-  if (primaryMode === "enable") await bool("enabled", true);
+  if (primaryMode === "start") await startCurrentConversation();
   else if (primaryMode === "resume") {
     await bool("enabled", true);
     await bool("autoContinue", true);
