@@ -37,18 +37,35 @@
       .replace(/\s+/g, " ")
       .trim();
   }
+  function cleanAssistantText(el) {
+    if (!el) return "";
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll?.(".safe-confirm-final-toggle").forEach((node) => node.remove());
+    return text(clone);
+  }
 
   function field(body, name) {
     const names = FIELDS.join("|");
-    const match = String(body || "").match(new RegExp(`^\\s*${name}\\s*:\\s*([\\s\\S]*?)(?=^\\s*(?:${names})\\s*:|$)`, "im"));
-    return match ? match[1].trim() : "";
+    const match = String(body || "").match(new RegExp(`(?:^|\\s|[·;])${name}\\s*:\\s*([\\s\\S]*?)(?=(?:\\s|[·;])(?:${names})\\s*:|$)`, "i"));
+    return match ? match[1].trim().replace(/[·;]\s*$/, "").trim() : "";
   }
 
   function parseFinal(raw) {
-    const match = String(raw || "").match(/<SCH_FINAL>([\s\S]*?)<\/SCH_FINAL>/i);
-    if (!match) return null;
-    const out = { raw: match[1].trim() };
+    const value = String(raw || "").replace(/SafeConfirm\s+Final/gi, "SCH_FINAL").replace(/SCH\s+FINAL/gi, "SCH_FINAL");
+    const xml = value.match(/<\s*SCH_FINAL\s*>([\s\S]*?)<\/\s*SCH_FINAL\s*>/i);
+    let body = "";
+    if (xml) body = xml[1].trim();
+    else {
+      const start = value.search(/\bSCH_FINAL\b/i);
+      if (start < 0) return null;
+      body = value.slice(start).replace(/^\s*SCH_FINAL\s*/i, "");
+      const end = body.search(/<\/\s*SCH_FINAL\s*>/i);
+      if (end >= 0) body = body.slice(0, end);
+      body = body.trim();
+    }
+    const out = { raw: body };
     FIELDS.forEach((name) => { out[name] = field(out.raw, name); });
+    if (!out.status && /^[^\p{L}\p{N}]*done\b/iu.test(norm(body))) out.status = "done";
     return out;
   }
 
@@ -104,15 +121,15 @@
   function reportFinalSeen(assistantEl) {
     const bridge = window.__safeConfirmHelperBridge;
     const snapshot = bridge?.getSnapshot?.();
-    if (!snapshot?.taskActive) return;
-    bridge.reportSignal?.({ type: "final_ui_seen", taskId: snapshot.taskId, conversationKey: snapshot.conversationKey, messageHash: hash(text(assistantEl)), reason: "final_block_seen", confidence: 1, createdAt: Date.now() });
+    if (!snapshot?.taskActive || !snapshot?.promptInjected) return;
+    bridge.reportSignal?.({ type: "final_ui_seen", taskId: snapshot.taskId, conversationKey: snapshot.conversationKey, messageHash: hash(cleanAssistantText(assistantEl)), reason: "final_block_seen", confidence: 1, createdAt: Date.now() });
   }
 
   function foldFinals() {
     installStyle();
     assistantEls().forEach((assistantEl) => {
       if (assistantEl.dataset.safeConfirmFinalProcessed === "true") return;
-      const finalBlock = parseFinal(text(assistantEl));
+      const finalBlock = parseFinal(cleanAssistantText(assistantEl));
       if (!finalBlock) return;
       const container = finalContainer(assistantEl);
       if (container) insertToggle(container, finalBlock, container);
@@ -148,15 +165,15 @@
 
   function report(type, reason, messageHash, confidence) {
     const info = snapshot();
-    if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || info.pausedReason || info.sending) return false;
+    if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || !info?.promptInjected || info.pausedReason || info.sending) return false;
     return !!window.__safeConfirmHelperBridge?.reportSignal?.({ type, taskId: info.taskId, conversationKey: info.conversationKey, messageHash, reason, confidence, createdAt: Date.now() });
   }
 
   function progressSignals() {
     const info = snapshot();
-    if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || info.conversationKey !== info.pageKey) return;
+    if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || !info?.promptInjected || info.conversationKey !== info.pageKey) return;
     const last = assistantEls().at(-1);
-    const raw = text(last);
+    const raw = cleanAssistantText(last);
     if (!raw || validFinal(parseFinal(raw))) return;
     const currentHash = hash(raw);
     if (currentHash === lastHash) return;
