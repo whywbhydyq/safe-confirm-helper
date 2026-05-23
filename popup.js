@@ -108,6 +108,8 @@ function taskLabel(s) {
   if (!s.settings.enabled) return "插件已暂停";
   if (!s.settings.superviseLongTasks) return "监督已关闭";
   if (s.task.status === "stopped_valid_final") return "已完成";
+  if (s.task.status === "unblocking") return "正在解决阻塞";
+  if (s.task.status === "paused_blocked") return "需要用户处理";
   if (s.task.status?.startsWith("paused") || s.automation.pausedReason) return "已暂停";
   if (s.task.active && !s.task.promptInjected) return "监督已开启";
   if (s.task.active) return "正在监督当前对话";
@@ -116,6 +118,8 @@ function taskLabel(s) {
 function reason(s) {
   if (!s.settings.enabled) return "点击按钮后会启用插件并只接管当前页面";
   if (!s.settings.autoContinue && s.task.active) return "自动继续已暂停；需要时可一键恢复";
+  if (s.task.status === "unblocking") return "AI 声明存在未完成、未验证或阻塞项，插件正在推动它换方案继续";
+  if (s.task.status === "paused_blocked") return "AI 声明需要用户外部操作才能继续，插件已暂停";
   if (s.automation.pausedReason || s.task.status?.startsWith("paused")) return mapPaused(s.automation.pausedReason, s.task.status);
   if (s.task.active && !s.task.promptInjected) return "等待你发送真实任务；发送时会自动追加监督协议";
   const stop = mapStopReason(s.task.stopReason);
@@ -162,7 +166,8 @@ function render(s) {
   el.enabled.checked = !!s.settings.enabled;
   el.supervise.checked = !!s.settings.superviseLongTasks;
   el.autoConfirm.checked = !!s.settings.autoConfirm;
-  el.keepAtBottom.checked = !!s.settings.keepAtBottom;
+  el.keepAtBottom.checked = !!s.settings.autoContinue && !!s.settings.keepAtBottom;
+  el.keepAtBottom.disabled = !s.settings.autoContinue;
   el.autoContinue.checked = !!s.settings.autoContinue;
   el.english.checked = !!s.settings.english;
   el.highlight.checked = !!s.settings.highlight;

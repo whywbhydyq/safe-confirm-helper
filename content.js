@@ -16,6 +16,17 @@ verdict: ready_to_stop
 ${FINAL_FORMAT}`;
   const AUDIT = `先不要结束。现在只做停机前自检，并按顺序回答：1. 原始需求是否全部覆盖？2. 已完成声明分别有什么证据？3. 哪些内容只是推测而非验证？4. 是否存在未完成项、未验证项或阻塞风险？如果有任何未完成、未验证或阻塞风险，不要输出 SCH_FINAL，继续执行或修复。只有确认无遗漏、无未验证项、无阻塞风险时，才只输出以下格式，不要添加其他文字：
 ${FINAL_FORMAT}`;
+  const UNBLOCK = `当前任务尚未完成。不要做停机前自检，不要输出 SCH_FINAL。
+
+请把刚才提到的未完成项、未验证项或阻塞点转化为下一步行动：
+- 能继续执行的，直接继续执行；
+- 能换工具或换路径的，换方案继续；
+- 能降级交付的，先完成可执行替代方案；
+- 能生成补丁、命令、文件包或明确操作清单的，就产出可用结果；
+- 只有确实必须用户外部操作且你无法继续推进时，才暂停并明确说明需要用户做什么。
+
+现在继续推进原始任务。`;
+  const PAUSE_BLOCKED = `当前任务需要用户外部操作才能继续。请列出阻塞项、需要用户完成的动作、完成后应从哪一步继续。不要输出 SCH_FINAL。`;
   const SUPERVISE = `[SafeConfirm Supervision]\n本轮是受监督的长任务。先执行用户的原始需求，不要一开始就做最终自检，也不要用一句“任务已完成”结束。\n执行过程中：优先推进实际任务；遇到未完成、未验证或阻塞风险时继续处理；不要把阶段性总结当作完成。\n准备停止前：必须自检原始需求覆盖情况、完成证据、未验证项和残余风险。\n只有确认无遗漏、无未验证项、无阻塞风险时，才只输出以下格式，不要添加其他文字：\n${FINAL_FORMAT}`;
   const DEF = { enabled: true, autoConfirm: true, keepAtBottom: true, autoContinue: true, superviseLongTasks: true, english: true, highlight: true, continuePrompt: CONTINUE, maxContinueCount: 50, continueCooldownMs: 10000, auditEvery: 3, userScrollPauseMs: 12000 };
   const ZH = [/^确认$/, /^允许$/, /^继续$/, /^批准$/, /确认/, /允许/, /批准/, /继续/];
@@ -48,6 +59,13 @@ ${FINAL_FORMAT}`;
     composerFailureCount: 0,
     lastContinueAt: 0,
     lastAssistantTextHash: "",
+    observedAssistantHash: "",
+    observedAssistantAt: 0,
+    lastAction: "",
+    lastPromptKind: "",
+    unblockCount: 0,
+    auditCount: 0,
+    lastActionAt: 0,
     pausedReason: "",
     sending: false,
     externalSignals: blankSignals()
@@ -86,7 +104,7 @@ ${FINAL_FORMAT}`;
 
   function legacyContinuePrompt(value) {
     const text = String(value || "");
-    return (/输出\s*SCH_FINAL/.test(text) && !/<SCH_FINAL>/i.test(text)) || /不要总结；不要只说/.test(text) || /继续原始任务。优先处理未完成、未验证或有风险/.test(text);
+    return (/输出\s*SCH_FINAL/.test(text) && !/<SCH_FINAL>/i.test(text)) || /不要总结；不要只说/.test(text) || /继续原始任务。优先处理未完成、未验证或有风险/.test(text) || /继续执行最初的任务/.test(text) || /完成最初的全部任务后请只回复/.test(text);
   }
 
   async function loadSettings() {
@@ -118,6 +136,13 @@ ${FINAL_FORMAT}`;
       composerFailureCount: runtime.composerFailureCount,
       lastContinueAt: runtime.lastContinueAt,
       lastAssistantTextHash: runtime.lastAssistantTextHash,
+      observedAssistantHash: runtime.observedAssistantHash,
+      observedAssistantAt: runtime.observedAssistantAt,
+      lastAction: runtime.lastAction,
+      lastPromptKind: runtime.lastPromptKind,
+      unblockCount: runtime.unblockCount,
+      auditCount: runtime.auditCount,
+      lastActionAt: runtime.lastActionAt,
       pausedReason: runtime.pausedReason
     };
   }
@@ -242,20 +267,41 @@ ${FINAL_FORMAT}`;
     el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
     return inputText(el) === value;
   }
-  function sendButton(el) { const root = el?.closest?.("form") || document; for (const selector of ["button[data-testid='send-button']", "button[aria-label*='发送']", "button[aria-label*='Send']", "button[title*='发送']", "button[title*='Send']", "button[type='submit']"]) { const button = root.querySelector(selector); if (button && enabled(button)) return button; } return Array.from(root.querySelectorAll(BTN)).filter(enabled).find((button) => /发送|send/i.test(text(button))) || null; }
+  function sendButton(el) { const root = el?.closest?.("form") || document; for (const selector of ["button[data-testid='send-button']", "button[data-testid='composer-send-button']", "button[aria-label*='发送']", "button[aria-label*='Send']", "button[title*='发送']", "button[title*='Send']", "button[type='submit']"]) { const button = root.querySelector(selector) || document.querySelector(selector); if (button && enabled(button)) return button; } return Array.from(document.querySelectorAll(BTN)).filter(enabled).find((button) => /发送|send/i.test(text(button))) || null; }
 
   function noteComposerFailure(reason) { runtime.composerFailureCount += 1; if (runtime.composerFailureCount >= 3) { runtime.pausedReason = reason; task.status = "paused_composer_failed"; toast(reason); } void saveSession(); }
   function noteSendFailure(reason) { runtime.sendFailureCount += 1; if (runtime.sendFailureCount >= 3) { runtime.pausedReason = reason; task.status = "paused_send_failed"; toast(reason); } void saveSession(); }
-  function queuePrompt(prompt, sent, failed) { const el = input(); if (!el || !visible(el)) { noteComposerFailure("连续多次找不到输入框，自动继续已暂停"); return false; } if (inputText(el)) return false; if (!setInput(el, prompt)) { noteComposerFailure("连续多次无法写入输入框，自动继续已暂停"); return false; } runtime.composerFailureCount = 0; delay(() => trySend(el, 0, sent, failed), 120); return true; }
-  function trySend(el, attempt, sent, failed) { const button = sendButton(el); if (button && enabled(button)) { click(button); sent?.(); return true; } if (attempt < 2) { delay(() => trySend(el, attempt + 1, sent, failed), 700); return false; } failed?.(); return false; }
+  function queuePrompt(prompt, sent, failed) { const el = input(); if (!el || !visible(el)) { noteComposerFailure("连续多次找不到输入框，自动继续已暂停"); return false; } const draft = inputText(el); if (draft && !pluginPrompt(draft)) return false; if (!draft && !setInput(el, prompt)) { noteComposerFailure("连续多次无法写入输入框，自动继续已暂停"); return false; } runtime.composerFailureCount = 0; delay(() => trySend(el, 0, sent, failed), 250); return true; }
+  function pressEnter(el) { el.focus(); for (const type of ["keydown", "keypress", "keyup"]) el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", bubbles: true, cancelable: true })); }
+  function trySend(el, attempt, sent, failed) {
+    const button = sendButton(el);
+    if (button && enabled(button)) { click(button); sent?.(); return true; }
+    if (attempt < 6) { delay(() => trySend(el, attempt + 1, sent, failed), 900); return false; }
+    const before = inputText(el);
+    pressEnter(el);
+    delay(() => {
+      const after = inputText(el);
+      if (after && norm(after) === norm(before)) failed?.();
+      else sent?.();
+    }, 800);
+    return false;
+  }
 
   function lastAssistantEl() { const direct = [...document.querySelectorAll("[data-message-author-role='assistant']")].filter(visible); if (direct.length) return direct.at(-1); const messages = [...document.querySelectorAll("article,[data-testid*='conversation-turn']")].filter(visible); for (let i = messages.length - 1; i >= 0; i -= 1) { const role = messages[i].getAttribute("data-message-author-role"); if (role === "user") continue; if (role === "assistant" || !messages[i].querySelector("textarea,[contenteditable='true']")) return messages[i]; } return null; }
   function lastAssistantText() { return cleanAssistantText(lastAssistantEl()); }
   function running() { const buttons = Array.from(document.querySelectorAll(BTN)).filter(visible); return buttons.some((button) => /停止|中止|stop|cancel/i.test(text(button))) || /正在思考|正在运行|正在生成|thinking|running|generating/i.test(lastAssistantText()); }
 
-  function pluginPrompt(raw) { const value = norm(raw); return value === norm(CONTINUE) || value === norm(AUDIT) || value.includes("现在做最终自检") || value.includes("继续原始任务"); }
+  function promptKind(raw) {
+    const value = norm(raw);
+    if (value === norm(UNBLOCK) || value.includes("当前任务尚未完成") || value.includes("转化为下一步行动")) return "unblock";
+    if (value === norm(AUDIT) || value.includes("现在只做停机前自检") || value.includes("停机前自检") || value.includes("现在做最终自检")) return "audit";
+    if (value === norm(PAUSE_BLOCKED) || value.includes("需要用户外部操作才能继续")) return "pause";
+    if (value === norm(CONTINUE) || value.includes("继续原始任务") || value.includes("继续执行原始任务") || value.includes("继续执行最初的任务")) return "continue";
+    return "";
+  }
+  function pluginPrompt(raw) { return !!promptKind(raw); }
 
-  function resetTask(reason = "") { task = blankTask(); Object.assign(runtime, { continueCount: 0, sendFailureCount: 0, composerFailureCount: 0, lastContinueAt: 0, lastAssistantTextHash: "", pausedReason: "", sending: false, externalSignals: blankSignals() }); if (reason) task.stopReason = reason; void saveSession(); }
+  function resetTask(reason = "") { task = blankTask(); Object.assign(runtime, { continueCount: 0, sendFailureCount: 0, composerFailureCount: 0, lastContinueAt: 0, lastAssistantTextHash: "", observedAssistantHash: "", observedAssistantAt: 0, lastAction: "", lastPromptKind: "", unblockCount: 0, auditCount: 0, lastActionAt: 0, pausedReason: "", sending: false, externalSignals: blankSignals() }); if (reason) task.stopReason = reason; void saveSession(); }
   function prepare(el) {
     if (!settings.enabled || !settings.superviseLongTasks || !task.active) return false;
     const raw = inputText(el);
@@ -302,14 +348,47 @@ ${FINAL_FORMAT}`;
   function getSnapshot() { return { enabled: settings.enabled, autoContinue: settings.autoContinue, superviseLongTasks: settings.superviseLongTasks, taskActive: task.active, promptInjected: task.promptInjected, taskStatus: task.status, taskId: task.taskId, conversationKey: task.conversationKey, pausedReason: runtime.pausedReason, continueCount: runtime.continueCount, maxContinueCount: settings.maxContinueCount, lastContinueAt: runtime.lastContinueAt, cooldownMs: settings.continueCooldownMs, sending: runtime.sending, pageKey: getConversationKey() }; }
   function acceptSignal(signal) { if (!signal || typeof signal !== "object") return false; if (!settings.enabled || !settings.autoContinue || !settings.superviseLongTasks || !task.active || !task.promptInjected || runtime.pausedReason) return false; if (signal.taskId !== task.taskId || signal.conversationKey !== task.conversationKey || task.conversationKey !== getConversationKey()) return false; if (Date.now() - Number(signal.createdAt || 0) > 60000) return false; if (!["risk_word", "stale_progress", "final_ui_seen"].includes(signal.type)) return false; const signals = runtime.externalSignals; if (signal.type === "risk_word") signals.riskWord = true; if (signal.type === "stale_progress") signals.staleProgress = true; if (signal.type === "final_ui_seen") signals.finalUiSeen = true; signals.lastSignalAt = Date.now(); signals.lastMessageHash = String(signal.messageHash || signals.lastMessageHash || ""); signals.reasons = Array.from(new Set([...(signals.reasons || []), String(signal.reason || signal.type)])).slice(-8); return true; }
   function consumeExternalSignals(lastHash) { const signals = runtime.externalSignals; if (!signals?.lastSignalAt) return null; const expired = Date.now() - signals.lastSignalAt > 60000; const mismatch = signals.lastMessageHash && signals.lastMessageHash !== lastHash; if (expired || mismatch) { runtime.externalSignals = blankSignals(); return null; } const result = { riskWord: signals.riskWord, staleProgress: signals.staleProgress, finalUiSeen: signals.finalUiSeen, reasons: [...signals.reasons] }; runtime.externalSignals = blankSignals(); return result; }
-  function auditNeeded(raw, gateResult, signal) { return /任务已完成|已完成|完成了|done|completed|finished|ready_to_stop|未验证|未测试|未运行|无法确认|需要你确认|可能|大概|理论上|应该|如果|not verified|not tested|cannot confirm|need confirmation|probably|maybe|should|if\b/i.test(String(raw || "")) || ["unverified_exists", "blocking_risk_exists", "risk_word_exists", "blocking_keyword_in_final", "weak_risk_keyword_in_final"].includes(gateResult.reason) || !!signal?.riskWord || !!signal?.staleProgress || (task.loopCount > 0 && task.loopCount % settings.auditEvery === 0); }
+  function assistantStable(lastHash) { if (runtime.observedAssistantHash !== lastHash) { runtime.observedAssistantHash = lastHash; runtime.observedAssistantAt = Date.now(); void saveSession(); return false; } return Date.now() - runtime.observedAssistantAt >= 3500; }
+  function negatedReady(raw) { return /不应视为\s*ready_to_stop|不是\s*ready_to_stop|不能.*ready_to_stop|not\s+ready_to_stop|not.*ready to stop|should\s+not.*ready_to_stop|should\s+not.*ready to stop/i.test(String(raw || "")); }
+  function blockedOrIncomplete(raw) { return /未完成|没有全部覆盖|未覆盖|未验证|未测试|未运行|无法验证|无法确认|不能输出\s*SCH_FINAL|不要输出\s*SCH_FINAL|不能结束|阻塞|失败|被拦截|权限不足|无法访问|不能\s*git\s*push|不能部署|未完成|not complete|incomplete|not verified|not tested|not run|cannot verify|cannot confirm|blocked|failed|permission denied|unable to access|cannot push|cannot deploy|do not output\s*SCH_FINAL/i.test(String(raw || "")) || negatedReady(raw); }
+  function externalBlock(raw) { return /需要(你|用户|人工|手动).*(登录|提供|配置|绑定|授权|token|key|密钥|账号|域名|Search Console|AdSense)|必须(你|用户|人工|手动).*(登录|提供|配置|绑定|授权|token|key|密钥|账号|域名|Search Console|AdSense)|requires? user|need(s)? user|must be done by user|manual login|manual configuration|provide .*token|provide .*key/i.test(String(raw || "")); }
+  function completionIntent(raw) { return /任务全部完成|已经完成全部|全部要求已完成|可以结束|任务已完成|已完成全部|done|completed|finished|ready_to_stop/i.test(String(raw || "")) && !negatedReady(raw); }
+  function periodicAuditDue() { return task.loopCount > 0 && task.loopCount % settings.auditEvery === 0 && runtime.lastAction !== "unblock"; }
+  function classifyNextAction(raw, finalBlock, gateResult, signal) {
+    if (gateResult?.canStop) return "stop";
+    if (externalBlock(raw) && runtime.lastAction === "unblock" && runtime.unblockCount >= 1) return "pause";
+    if (finalBlock) return "audit";
+    if (blockedOrIncomplete(raw) || !!signal?.riskWord || !!signal?.staleProgress) return "unblock";
+    if (completionIntent(raw) || !!signal?.finalUiSeen) return "audit";
+    if (periodicAuditDue()) return "audit";
+    return "continue";
+  }
+  function promptForAction(action) {
+    if (action === "audit") return AUDIT;
+    if (action === "unblock") return UNBLOCK;
+    if (action === "pause") return PAUSE_BLOCKED;
+    return settings.continuePrompt || CONTINUE;
+  }
+  function statusForAction(action) {
+    if (action === "audit") return "auditing";
+    if (action === "unblock") return "unblocking";
+    if (action === "pause") return "paused_blocked";
+    return "continuing";
+  }
+  function recordAction(action) {
+    runtime.lastAction = action;
+    runtime.lastPromptKind = action;
+    runtime.lastActionAt = Date.now();
+    if (action === "unblock") runtime.unblockCount += 1;
+    if (action === "audit") { runtime.auditCount += 1; task.auditCount += 1; }
+  }
 
   async function startCurrentSupervision() {
     if (runtime.sending) return { ok: false, reason: "正在发送中" };
     settings = cleanSettings({ ...settings, enabled: true, superviseLongTasks: true, autoContinue: true });
     await saveSettings();
     task = { active: true, status: "armed", taskId: `${Date.now().toString(36)}-manual-${hash(getConversationKey())}`, conversationKey: getConversationKey(), startedAt: Date.now(), loopCount: 0, auditCount: 0, promptInjected: false, lastFinal: null, lastGateReason: "", stopReason: "" };
-    Object.assign(runtime, { continueCount: 0, sendFailureCount: 0, composerFailureCount: 0, lastContinueAt: 0, lastAssistantTextHash: "", pausedReason: "", sending: false, externalSignals: blankSignals() });
+    Object.assign(runtime, { continueCount: 0, sendFailureCount: 0, composerFailureCount: 0, lastContinueAt: 0, lastAssistantTextHash: "", observedAssistantHash: "", observedAssistantAt: 0, lastAction: "", lastPromptKind: "", unblockCount: 0, auditCount: 0, lastActionAt: 0, pausedReason: "", sending: false, externalSignals: blankSignals() });
     await saveSession();
     loops();
     requestAssist();
@@ -325,6 +404,7 @@ ${FINAL_FORMAT}`;
     if (!last || running()) return false;
     if (Date.now() - runtime.lastContinueAt < settings.continueCooldownMs) return false;
     const lastHash = hash(last);
+    if (document.visibilityState !== "visible" || !assistantStable(lastHash)) return false;
     if (runtime.lastAssistantTextHash === lastHash) return false;
 
     const finalBlock = parseFinal(last);
@@ -334,33 +414,51 @@ ${FINAL_FORMAT}`;
     void saveSession();
     if (gateResult.canStop) { task.active = false; task.status = "stopped_valid_final"; task.stopReason = "合格 SCH_FINAL 已出现"; runtime.composerFailureCount = 0; runtime.sendFailureCount = 0; runtime.externalSignals = blankSignals(); void saveSession(); toast("已达到自验证停止条件"); return false; }
 
+    const signal = consumeExternalSignals(lastHash);
+    const action = classifyNextAction(last, finalBlock, gateResult, signal);
+    if (action === "pause") {
+      runtime.pausedReason = "需要用户外部操作才能继续";
+      task.status = "paused_blocked";
+      runtime.lastAction = "pause";
+      runtime.lastPromptKind = "pause";
+      runtime.lastActionAt = Date.now();
+      void saveSession();
+      toast("已暂停：需要用户外部操作");
+      return false;
+    }
+
     const editor = input();
     if (!editor || !visible(editor)) { noteComposerFailure("连续多次找不到输入框，自动继续已暂停"); return false; }
-    if (inputText(editor)) return false;
+    const prompt = promptForAction(action);
+    const draft = inputText(editor);
+    if (draft) {
+      if (!pluginPrompt(draft)) return false;
+      if (norm(draft) !== norm(prompt) && !setInput(editor, prompt)) return false;
+      runtime.sending = true;
+      void saveSession();
+      return trySend(editor, 0, () => { runtime.continueCount += 1; task.loopCount += 1; recordAction(action); runtime.sendFailureCount = 0; runtime.composerFailureCount = 0; runtime.lastContinueAt = Date.now(); runtime.lastAssistantTextHash = lastHash; runtime.sending = false; void saveSession(); toast(`已发送已排队的${action === "audit" ? "审计" : action === "unblock" ? "解阻" : "继续"}提示（${runtime.continueCount}/${settings.maxContinueCount}）`); }, () => { runtime.sending = false; noteSendFailure("连续多次无法发送，自动继续已暂停"); });
+    }
 
-    const signal = consumeExternalSignals(lastHash);
-    const audit = auditNeeded(last, gateResult, signal);
-    task.status = audit ? "auditing" : "continuing";
-    if (audit) task.auditCount += 1;
+    task.status = statusForAction(action);
     runtime.sending = true;
     void saveSession();
-    const queued = queuePrompt(audit ? AUDIT : (settings.continuePrompt || CONTINUE), () => { runtime.continueCount += 1; task.loopCount += 1; runtime.sendFailureCount = 0; runtime.composerFailureCount = 0; runtime.lastContinueAt = Date.now(); runtime.lastAssistantTextHash = lastHash; runtime.sending = false; void saveSession(); toast(`${audit ? "已触发最终自检" : "已自动发送继续"}（${runtime.continueCount}/${settings.maxContinueCount}）`); }, () => { runtime.sending = false; noteSendFailure("连续多次无法发送，自动继续已暂停"); });
+    const queued = queuePrompt(prompt, () => { runtime.continueCount += 1; task.loopCount += 1; recordAction(action); runtime.sendFailureCount = 0; runtime.composerFailureCount = 0; runtime.lastContinueAt = Date.now(); runtime.lastAssistantTextHash = lastHash; runtime.sending = false; void saveSession(); toast(`${action === "audit" ? "已触发最终自检" : action === "unblock" ? "已发送解阻提示" : "已自动发送继续"}（${runtime.continueCount}/${settings.maxContinueCount}）`); }, () => { runtime.sending = false; noteSendFailure("连续多次无法发送，自动继续已暂停"); });
     if (!queued) { runtime.sending = false; void saveSession(); }
     return queued;
   }
 
   function scrollBottom() { if (Date.now() - lastUserScroll < settings.userScrollPauseMs) return; programmaticScrollUntil = Date.now() + 500; scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight); Array.from(document.querySelectorAll("main,[role='main'],[class*='scroll'],[data-testid*='conversation'],div")).filter((el) => visible(el) && el.scrollHeight - el.clientHeight > 80).sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight)).slice(0, 4).forEach((el) => { el.scrollTop = el.scrollHeight; }); }
-  function assist() { if (!settings.enabled) return; if (settings.keepAtBottom) scrollBottom(); if (settings.autoContinue) maybeContinue(); }
+  function assist() { if (!settings.enabled) return; if (settings.autoContinue && settings.keepAtBottom) scrollBottom(); if (settings.autoContinue) maybeContinue(); }
   function requestAssist() { if (document.visibilityState === "hidden") { const now = Date.now(); if (now - lastHiddenAssist < 500) return; lastHiddenAssist = now; assist(); return; } if (assistTimer) return; assistTimer = delay(() => { assistTimer = 0; assist(); }, 350); }
   function own(node) { return node instanceof Element && (node.id === `${APP_ID}-toast` || node.closest?.(`#${APP_ID}-panel`) || node.classList?.contains("safe-confirm-final-toggle")); }
   function ownMut(mutation) { if (own(mutation.target)) return true; const nodes = [...mutation.addedNodes, ...mutation.removedNodes]; return nodes.length > 0 && nodes.every(own); }
   function candidateMayChange(el, deep = false) { return el instanceof Element && (el.matches(BTN) || el.matches(DLG) || el.closest(DLG) || ((deep || el.childElementCount <= 80) && el.querySelector(`${BTN},${DLG}`))); }
   function scanMut(mutation) { if (ownMut(mutation)) return false; if (mutation.type === "characterData") return !!mutation.target.parentElement?.closest(BTN); if (mutation.type === "attributes") return candidateMayChange(mutation.target); return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => candidateMayChange(node, true)); }
-  function assistMut(mutation) { if (ownMut(mutation) || !settings.enabled || (!settings.keepAtBottom && !settings.autoContinue)) return false; const may = (node) => node instanceof Element && (node.matches("main,article,form,textarea,[contenteditable='true'],[data-message-author-role]") || node.closest("main,article,form,[data-message-author-role]") || (node.childElementCount <= 120 && node.querySelector("article,form,textarea,[contenteditable='true'],[data-message-author-role]"))); return mutation.type === "attributes" ? may(mutation.target) : (mutation.type === "characterData" ? [mutation.target.parentElement] : [...mutation.addedNodes, ...mutation.removedNodes]).some(may); }
-  function loops() { clearTimer(scanLoop); clearTimer(assistLoop); if (settings.enabled && settings.autoConfirm) scanLoop = every(scan, 1000); if (settings.enabled && (settings.keepAtBottom || settings.autoContinue)) assistLoop = every(assist, 1500); }
+  function assistMut(mutation) { if (ownMut(mutation) || !settings.enabled || !settings.autoContinue) return false; const may = (node) => node instanceof Element && (node.matches("main,article,form,textarea,[contenteditable='true'],[data-message-author-role]") || node.closest("main,article,form,[data-message-author-role]") || (node.childElementCount <= 120 && node.querySelector("article,form,textarea,[contenteditable='true'],[data-message-author-role]"))); return mutation.type === "attributes" ? may(mutation.target) : (mutation.type === "characterData" ? [mutation.target.parentElement] : [...mutation.addedNodes, ...mutation.removedNodes]).some(may); }
+  function loops() { clearTimer(scanLoop); clearTimer(assistLoop); if (settings.enabled && settings.autoConfirm) scanLoop = every(scan, 1000); if (settings.enabled && settings.autoContinue) assistLoop = every(assist, 1500); }
 
   function state() { return { connected: true, enabled: settings.enabled, candidateText: candidate ? text(candidate) : "", scanInfo: { ...scanInfo, autoClickable: candidateAutoClickable }, automation: { ...runtime, maxContinueCount: settings.maxContinueCount }, task: { ...task, finalValid: task.lastGateReason === "valid_final", hasFinal: !!task.lastFinal }, settings: { ...settings } }; }
-  function popup(msg, _sender, sendResponse) { if (msg?.source !== `${APP_ID}-popup`) return false; (async () => { if (msg.action === "confirm") manualClick(); else if (msg.action === "rescan") scan(); else if (msg.action === "reset-task") { resetTask("manual_reset"); loops(); } else if (msg.action === "takeover-current") await startCurrentSupervision(); else if (msg.action === "set-setting" && Object.prototype.hasOwnProperty.call(DEF, msg.key)) { const value = msg.valueType === "number" ? Number(msg.value) : msg.valueType === "string" ? String(msg.value ?? "") : Boolean(msg.value); settings = cleanSettings({ ...settings, [msg.key]: value }); if ((msg.key === "enabled" || msg.key === "autoContinue") && !value) runtime.externalSignals = blankSignals(); if ((msg.key === "enabled" || msg.key === "autoContinue") && value) { runtime.pausedReason = ""; runtime.externalSignals = blankSignals(); } await saveSettings(); await saveSession(); loops(); requestScan(); requestAssist(); } else if (msg.action === "get-state") scan(); sendResponse(state()); })().catch(() => sendResponse(state())); return true; }
+  function popup(msg, _sender, sendResponse) { if (msg?.source !== `${APP_ID}-popup`) return false; (async () => { if (msg.action === "confirm") manualClick(); else if (msg.action === "rescan") scan(); else if (msg.action === "reset-task") { resetTask("manual_reset"); loops(); } else if (msg.action === "takeover-current") await startCurrentSupervision(); else if (msg.action === "set-setting" && Object.prototype.hasOwnProperty.call(DEF, msg.key)) { const value = msg.valueType === "number" ? Number(msg.value) : msg.valueType === "string" ? String(msg.value ?? "") : Boolean(msg.value); settings = cleanSettings({ ...settings, [msg.key]: value }); if ((msg.key === "enabled" || msg.key === "autoContinue") && !value) runtime.externalSignals = blankSignals(); if ((msg.key === "enabled" || msg.key === "autoContinue") && value) { runtime.pausedReason = ""; runtime.externalSignals = blankSignals(); if (task.status?.startsWith("paused")) task.status = task.promptInjected ? "supervising" : "armed"; } await saveSettings(); await saveSession(); loops(); requestScan(); requestAssist(); } else if (msg.action === "get-state") scan(); sendResponse(state()); })().catch(() => sendResponse(state())); return true; }
 
   function installBridge() { bridge = { version: "2.2.0", getSnapshot, reportSignal: acceptSignal, clearSignals: () => { runtime.externalSignals = blankSignals(); } }; window.__safeConfirmHelperBridge = bridge; }
   function cleanup() { ac.abort(); observer?.disconnect(); [scanTimer, assistTimer, scanLoop, assistLoop].forEach(clearTimer); timers.forEach((id) => { clearTimeout(id); clearInterval(id); }); timers.clear(); clearMark(); document.getElementById(`${APP_ID}-toast`)?.remove(); chrome.runtime?.onMessage?.removeListener(popup); if (window.__safeConfirmHelperBridge === bridge) delete window.__safeConfirmHelperBridge; }
