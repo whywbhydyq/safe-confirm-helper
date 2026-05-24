@@ -26,6 +26,10 @@
   let lastStaleAt = 0;
   let lastAuditHash = "";
   let repeatedAuditCount = 0;
+  let lastUserScroll = 0;
+  let programmaticScrollUntil = 0;
+  let lastSettingsRead = 0;
+  let keepSettings = { enabled: true, keepAtBottom: false, userScrollPauseMs: 12000 };
 
   const norm = (value) => String(value || "").replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
   const hash = (value) => { let h = 2166136261; const s = String(value || ""); for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
@@ -185,6 +189,45 @@
     return window.__safeConfirmHelperBridge?.getSnapshot?.() || null;
   }
 
+  function refreshKeepSettings() {
+    const now = Date.now();
+    if (now - lastSettingsRead < 1000) return;
+    lastSettingsRead = now;
+    chrome?.storage?.local?.get?.(["settings"]).then((result) => {
+      const current = result?.settings || {};
+      keepSettings = {
+        enabled: current.enabled !== false,
+        keepAtBottom: !!current.keepAtBottom,
+        userScrollPauseMs: Number(current.userScrollPauseMs) || 12000
+      };
+    }).catch(() => {});
+  }
+
+  function supervisionForcesBottom() {
+    const info = snapshot();
+    return !!(info?.enabled && info?.superviseLongTasks && info?.taskActive && info?.taskStatus !== "stopped_valid_final");
+  }
+
+  function shouldKeepBottom() {
+    const info = snapshot();
+    if (info && !info.enabled) return false;
+    if (!info && !keepSettings.enabled) return false;
+    return !!keepSettings.keepAtBottom || supervisionForcesBottom();
+  }
+
+  function keepBottom() {
+    refreshKeepSettings();
+    if (document.visibilityState === "hidden" || !shouldKeepBottom()) return;
+    if (Date.now() - lastUserScroll < keepSettings.userScrollPauseMs) return;
+    programmaticScrollUntil = Date.now() + 500;
+    scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight);
+    Array.from(document.querySelectorAll("main,[role='main'],[class*='scroll'],[data-testid*='conversation'],div"))
+      .filter((el) => visible(el) && el.scrollHeight - el.clientHeight > 80)
+      .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))
+      .slice(0, 4)
+      .forEach((el) => { el.scrollTop = el.scrollHeight; });
+  }
+
   function report(type, reason, messageHash, confidence) {
     const info = snapshot();
     if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || !info?.promptInjected || info.pausedReason || info.sending) return false;
@@ -269,14 +312,16 @@
     foldFinals();
     progressSignals();
     rewriteAuditDraft();
+    keepBottom();
   }
   function scheduleTick() { if (!timer) timer = setTimeout(tick, 120); }
 
   observer = new MutationObserver(scheduleTick);
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-safe-confirm-final-collapsed", "data-safe-confirm-final-processed", "class", "style"] });
-  loop = setInterval(scheduleTick, 2500);
+  loop = setInterval(scheduleTick, 1500);
   document.addEventListener("input", scheduleTick, { capture: true, signal: ac.signal });
   document.addEventListener("visibilitychange", scheduleTick, { signal: ac.signal });
+  document.addEventListener("scroll", () => { if (Date.now() > programmaticScrollUntil) lastUserScroll = Date.now(); }, { capture: true, passive: true, signal: ac.signal });
 
   window.__safeConfirmHelperEnhancementsCleanup = () => {
     ac.abort();
