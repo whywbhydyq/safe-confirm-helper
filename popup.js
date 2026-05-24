@@ -68,6 +68,9 @@ function setPill(text, cls = "") {
   el.connectionPill.textContent = text;
   el.connectionPill.className = `pill ${cls}`.trim();
 }
+function supervisedActive(s) {
+  return !!(s?.settings?.enabled && s?.settings?.superviseLongTasks && s?.task?.active && s?.task?.status !== "stopped_valid_final");
+}
 function mapGateReason(reason) {
   const map = {
     missing_final: "AI 还没有完成最终自检",
@@ -117,11 +120,11 @@ function taskLabel(s) {
 }
 function reason(s) {
   if (!s.settings.enabled) return "点击按钮后会启用插件并只接管当前页面";
-  if (!s.settings.autoContinue && s.task.active) return "自动继续已暂停；需要时可一键恢复";
+  if (!s.settings.autoContinue && s.task.active) return "自动继续已暂停；保持底部仍随监督模式强制开启";
   if (s.task.status === "unblocking") return "AI 声明存在未完成、未验证或阻塞项，插件正在推动它换方案继续";
   if (s.task.status === "paused_blocked") return "AI 声明需要用户外部操作才能继续，插件已暂停";
   if (s.automation.pausedReason || s.task.status?.startsWith("paused")) return mapPaused(s.automation.pausedReason, s.task.status);
-  if (s.task.active && !s.task.promptInjected) return "等待你发送真实任务；发送时会自动追加监督协议";
+  if (s.task.active && !s.task.promptInjected) return "等待你发送真实任务；发送时会自动追加监督协议，并保持底部开启";
   const stop = mapStopReason(s.task.stopReason);
   if (stop) return stop;
   if (s.task.lastGateReason) return mapGateReason(s.task.lastGateReason);
@@ -150,6 +153,10 @@ function updatePrimary(s) {
   primaryMode = "pause";
   el.primaryAction.textContent = "暂停自动继续";
 }
+async function enforceSupervisionBottom(s) {
+  if (!supervisedActive(s) || s.settings.keepAtBottom) return;
+  await run("set-setting", { key: "keepAtBottom", value: true });
+}
 function render(s) {
   connected = true;
   disabled(false);
@@ -163,11 +170,12 @@ function render(s) {
   el.candidate.textContent = autoConfirmText;
   const autoText = s.scanInfo.autoClickable === false ? "仅高亮，不自动点" : s.scanInfo.autoClickable === true ? "弹窗按钮可自动点" : "等待扫描";
   el.scanInfo.textContent = `${autoText} · 匹配 ${s.scanInfo.matches || 0} 个候选`;
+  const forceBottom = supervisedActive(s);
   el.enabled.checked = !!s.settings.enabled;
   el.supervise.checked = !!s.settings.superviseLongTasks;
   el.autoConfirm.checked = !!s.settings.autoConfirm;
-  el.keepAtBottom.checked = !!s.settings.autoContinue && !!s.settings.keepAtBottom;
-  el.keepAtBottom.disabled = !s.settings.autoContinue;
+  el.keepAtBottom.checked = forceBottom || !!s.settings.keepAtBottom;
+  el.keepAtBottom.disabled = forceBottom;
   el.autoContinue.checked = !!s.settings.autoContinue;
   el.english.checked = !!s.settings.english;
   el.highlight.checked = !!s.settings.highlight;
@@ -179,6 +187,7 @@ function render(s) {
     el.promptState.textContent = "已同步";
   }
   updatePrimary(s);
+  void enforceSupervisionBottom(s);
 }
 function disconnected(message) {
   connected = false;
@@ -232,6 +241,7 @@ async function startCurrentConversation() {
   el.primaryAction.disabled = true;
   el.primaryAction.textContent = "正在开启监督...";
   const s = await run("takeover-current");
+  if (s?.task?.active) await bool("keepAtBottom", true);
   el.primaryAction.disabled = false;
   return !!s?.task?.active;
 }
@@ -241,6 +251,7 @@ async function primaryAction() {
   else if (primaryMode === "resume") {
     await bool("enabled", true);
     await bool("autoContinue", true);
+    await bool("keepAtBottom", true);
   } else await bool("autoContinue", false);
 }
 el.primaryAction.addEventListener("click", primaryAction);
