@@ -120,11 +120,11 @@ function taskLabel(s) {
 }
 function reason(s) {
   if (!s.settings.enabled) return "点击按钮后会启用插件并只接管当前页面";
-  if (!s.settings.autoContinue && s.task.active) return "自动继续已暂停；保持底部仍随监督模式强制开启";
+  if (!s.settings.autoContinue && s.task.active) return "自动继续已暂停；保持底部仍随监督模式临时强制开启";
   if (s.task.status === "unblocking") return "AI 声明存在未完成、未验证或阻塞项，插件正在推动它换方案继续";
   if (s.task.status === "paused_blocked") return "AI 声明需要用户外部操作才能继续，插件已暂停";
   if (s.automation.pausedReason || s.task.status?.startsWith("paused")) return mapPaused(s.automation.pausedReason, s.task.status);
-  if (s.task.active && !s.task.promptInjected) return "等待你发送真实任务；发送时会自动追加监督协议，并保持底部开启";
+  if (s.task.active && !s.task.promptInjected) return "等待你发送真实任务；发送时会自动追加监督协议，并临时保持底部";
   const stop = mapStopReason(s.task.stopReason);
   if (stop) return stop;
   if (s.task.lastGateReason) return mapGateReason(s.task.lastGateReason);
@@ -152,10 +152,6 @@ function updatePrimary(s) {
   }
   primaryMode = "pause";
   el.primaryAction.textContent = "暂停自动继续";
-}
-async function enforceSupervisionBottom(s) {
-  if (!supervisedActive(s) || s.settings.keepAtBottom) return;
-  await run("set-setting", { key: "keepAtBottom", value: true });
 }
 function render(s) {
   connected = true;
@@ -187,7 +183,6 @@ function render(s) {
     el.promptState.textContent = "已同步";
   }
   updatePrimary(s);
-  void enforceSupervisionBottom(s);
 }
 function disconnected(message) {
   connected = false;
@@ -241,7 +236,6 @@ async function startCurrentConversation() {
   el.primaryAction.disabled = true;
   el.primaryAction.textContent = "正在开启监督...";
   const s = await run("takeover-current");
-  if (s?.task?.active) await bool("keepAtBottom", true);
   el.primaryAction.disabled = false;
   return !!s?.task?.active;
 }
@@ -251,7 +245,6 @@ async function primaryAction() {
   else if (primaryMode === "resume") {
     await bool("enabled", true);
     await bool("autoContinue", true);
-    await bool("keepAtBottom", true);
   } else await bool("autoContinue", false);
 }
 el.primaryAction.addEventListener("click", primaryAction);
