@@ -37,8 +37,8 @@
       <small id="scan-info">只会自动点击弹窗内的确认按钮</small>
     </section>
 
-    <details class="panel advanced-panel">
-      <summary>高级设置</summary>
+    <details class="panel advanced-panel" open>
+      <summary>设置</summary>
 
       <section class="advanced-section">
         <div class="section-title"><span>运行控制</span></div>
@@ -47,7 +47,7 @@
           <input id="enabled-input" class="switch-input" type="checkbox">
         </label>
         <label class="setting-row">
-          <span><strong>长任务监督</strong><small>自动识别长任务并追加监督协议</small></span>
+          <span><strong>长任务监督</strong><small>点击主按钮后接管当前页下一条真实任务</small></span>
           <input id="supervise-input" class="switch-input" type="checkbox">
         </label>
         <label class="setting-row">
@@ -59,7 +59,7 @@
           <input id="auto-confirm-input" class="switch-input" type="checkbox">
         </label>
         <label class="setting-row">
-          <span><strong>保持底部</strong><small>对话持续贴近最新回复</small></span>
+          <span><strong>保持底部</strong><small>普通模式可自选；监督开启后强制开启</small></span>
           <input id="keep-bottom-input" class="switch-input" type="checkbox">
         </label>
       </section>
