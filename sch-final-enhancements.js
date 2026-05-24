@@ -2,22 +2,35 @@
   const APP_ID = "safe-confirm-helper";
   const INPUTS = "#prompt-textarea,textarea,[contenteditable='true']";
   const FIELDS = ["status", "covered", "proof", "unverified", "risks", "verdict"];
+  const UNBLOCK = `当前任务尚未完成。不要做停机前自检，不要输出 SCH_FINAL。
+
+请把刚才提到的未完成项、未验证项或阻塞点转化为下一步行动：
+- 能继续执行的，直接继续执行；
+- 能换工具或换路径的，换方案继续；
+- 单一路径失败时，不要直接视为最终阻塞，优先尝试其他可用工具路径、文件包、补丁或可复制命令；
+- 能降级交付的，先完成可执行替代方案；
+- 只有确实必须用户外部操作且你无法继续推进时，才暂停并明确说明需要用户做什么。
+
+现在继续推进原始任务。`;
   const old = window.__safeConfirmHelperEnhancementsCleanup;
   if (typeof old === "function") old();
 
   const ac = new AbortController();
-  let intervalId = 0;
-  let tickTimer = 0;
+  let observer;
+  let timer = 0;
+  let loop = 0;
   let lastHash = "";
   let lastSig = "";
   let staleCount = 0;
-  let lastRiskSignalAt = 0;
-  let lastStaleSignalAt = 0;
+  let lastRiskAt = 0;
+  let lastStaleAt = 0;
+  let lastAuditHash = "";
+  let repeatedAuditCount = 0;
 
   const norm = (value) => String(value || "").replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
   const hash = (value) => { let h = 2166136261; const s = String(value || ""); for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
-  const riskHard = (value) => /阻塞|高风险|未验证|未测试|未运行|无法确认|需要.*确认|not verified|not tested|not run|cannot confirm|need.*confirmation/i.test(String(value || ""));
-  const riskWeak = (value) => /可能|大概|理论上|应该|如果|尚未|未确认|推测|估计|probably|maybe|should|if\b|likely|assume|assumption|theoretically|could be|might/i.test(String(value || ""));
+  const riskHard = (value) => /阻塞|高风险|未验证|未测试|未运行|无法确认|not verified|not tested|not run|cannot confirm/i.test(String(value || ""));
+  const riskWeak = (value) => /可能|大概|理论上|应该|如果|尚未|未确认|推测|估计|probably|maybe|should|if\b|likely|assume|theoretically|could be|might/i.test(String(value || ""));
   const empty = (value) => ["", "none", "no", "无", "没有", "空", "n/a", "na"].includes(norm(value).toLowerCase());
 
   function visible(el) {
@@ -30,18 +43,58 @@
 
   function text(el) {
     if (!el) return "";
-    const aria = el.getAttribute?.("aria-label") || el.getAttribute?.("title");
-    const value = el.getAttribute?.("value");
-    return [...new Set([aria, value, el.textContent, el.innerText].filter(Boolean).map((item) => item.trim()).filter(Boolean))]
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
+    return [...new Set([el.getAttribute?.("aria-label"), el.getAttribute?.("title"), el.getAttribute?.("value"), el.textContent, el.innerText].filter(Boolean).map((item) => item.trim()).filter(Boolean))].join(" ").replace(/\s+/g, " ").trim();
   }
+
   function cleanAssistantText(el) {
     if (!el) return "";
     const clone = el.cloneNode(true);
     clone.querySelectorAll?.(".safe-confirm-final-toggle").forEach((node) => node.remove());
     return text(clone);
+  }
+
+  function assistantEls() {
+    return Array.from(document.querySelectorAll("[data-message-author-role='assistant']")).filter(visible);
+  }
+
+  function lastAssistantText() {
+    return cleanAssistantText(assistantEls().at(-1));
+  }
+
+  function input() {
+    return Array.from(document.querySelectorAll(INPUTS)).filter(visible).find((el) => !el.closest(`#${APP_ID}-panel`)) || null;
+  }
+
+  function inputText(el) {
+    return !el ? "" : ("value" in el ? String(el.value || "") : String(el.textContent || "")).trim();
+  }
+
+  function setInput(el, value) {
+    if (!el) return false;
+    el.focus();
+    if ("value" in el) {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+      setter ? setter.call(el, value) : el.value = value;
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    const selection = getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("insertText", false, value);
+    }
+    if (inputText(el) !== value) el.textContent = value;
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    return inputText(el) === value;
+  }
+
+  function strictFinalBody(raw) {
+    const match = String(raw || "").match(/<\s*SCH_FINAL\s*>([\s\S]*?)<\/\s*SCH_FINAL\s*>/i);
+    return match ? match[1].trim() : null;
   }
 
   function field(body, name) {
@@ -51,22 +104,17 @@
   }
 
   function parseFinal(raw) {
-    const value = String(raw || "").replace(/SafeConfirm\s+Final/gi, "SCH_FINAL").replace(/SCH\s+FINAL/gi, "SCH_FINAL");
-    const xml = value.match(/<\s*SCH_FINAL\s*>([\s\S]*?)<\/\s*SCH_FINAL\s*>/i);
-    let body = "";
-    if (xml) body = xml[1].trim();
-    else {
-      const start = value.search(/\bSCH_FINAL\b/i);
-      if (start < 0) return null;
-      body = value.slice(start).replace(/^\s*SCH_FINAL\s*/i, "");
-      const end = body.search(/<\/\s*SCH_FINAL\s*>/i);
-      if (end >= 0) body = body.slice(0, end);
-      body = body.trim();
-    }
+    const body = strictFinalBody(raw);
+    if (!body) return null;
     const out = { raw: body };
-    FIELDS.forEach((name) => { out[name] = field(out.raw, name); });
+    FIELDS.forEach((name) => { out[name] = field(body, name); });
     if (!out.status && /^[^\p{L}\p{N}]*done\b/iu.test(norm(body))) out.status = "done";
     return out;
+  }
+
+  function usableFinal(raw) {
+    const finalBlock = parseFinal(raw);
+    return !!finalBlock && FIELDS.some((name) => String(finalBlock[name] || "").trim());
   }
 
   function validFinal(finalBlock) {
@@ -79,29 +127,21 @@
     return !(riskHard(finalBlock.raw) || riskWeak(finalBlock.raw));
   }
 
-  function assistantEls() {
-    const direct = Array.from(document.querySelectorAll("[data-message-author-role='assistant']")).filter(visible);
-    if (direct.length) return direct;
-    return Array.from(document.querySelectorAll("article,[data-testid*='conversation-turn']")).filter((el) => visible(el) && !el.querySelector(INPUTS));
-  }
-
   function installStyle() {
     if (document.getElementById(`${APP_ID}-final-fold-style`)) return;
     const style = document.createElement("style");
     style.id = `${APP_ID}-final-fold-style`;
-    style.textContent = `.safe-confirm-final-toggle{margin:8px 0;padding:6px 10px;border:1px solid rgba(148,163,184,.6);border-radius:8px;background:rgba(248,250,252,.95);color:#0f172a;font:12px/1.35 system-ui,sans-serif;cursor:pointer;text-align:left;max-width:100%}.safe-confirm-final-toggle:hover{background:#eef2ff}[data-safe-confirm-final-collapsed="true"]{max-height:76px!important;overflow:hidden!important;position:relative!important}[data-safe-confirm-final-collapsed="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:32px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,.96));pointer-events:none}`;
+    style.textContent = `.safe-confirm-final-toggle{margin:8px 0;padding:6px 10px;border:1px solid rgba(148,163,184,.6);border-radius:8px;background:rgba(248,250,252,.95);color:#0f172a;font:12px/1.35 system-ui,sans-serif;cursor:pointer;text-align:left;max-width:100%}[data-safe-confirm-final-collapsed="true"]{max-height:76px!important;overflow:hidden!important;position:relative!important}`;
     document.documentElement.appendChild(style);
   }
 
   function finalContainer(assistantEl) {
-    const nodes = Array.from(assistantEl.querySelectorAll("pre, code, p, li, blockquote, div")).filter((node) => text(node).includes("<SCH_FINAL>"));
-    const exact = nodes.find((node) => /^\s*<SCH_FINAL>[\s\S]*?<\/SCH_FINAL>\s*$/i.test(text(node)));
-    if (exact) return exact.closest("pre") || exact;
+    const nodes = Array.from(assistantEl.querySelectorAll("pre, code, p, li, blockquote, div")).filter((node) => /<\s*SCH_FINAL\s*>[\s\S]*?<\/\s*SCH_FINAL\s*>/i.test(text(node)));
     return nodes.length === 1 ? (nodes[0].closest("pre") || nodes[0]) : null;
   }
 
   function insertToggle(target, finalBlock, collapseTarget) {
-    if (!target || target.dataset.safeConfirmFinalProcessed === "true") return;
+    if (!target || target.dataset.safeConfirmFinalProcessed === "true" || !usableFinal(text(target))) return;
     const summary = () => `SafeConfirm Final · ${norm(finalBlock.status) || "unknown"} · unverified: ${norm(finalBlock.unverified) || "unknown"} · risks: ${norm(finalBlock.risks) || "unknown"}`;
     const button = document.createElement("button");
     button.type = "button";
@@ -119,44 +159,26 @@
   }
 
   function reportFinalSeen(assistantEl) {
+    const raw = cleanAssistantText(assistantEl);
+    if (!usableFinal(raw)) return;
     const bridge = window.__safeConfirmHelperBridge;
     const snapshot = bridge?.getSnapshot?.();
     if (!snapshot?.taskActive || !snapshot?.promptInjected) return;
-    bridge.reportSignal?.({ type: "final_ui_seen", taskId: snapshot.taskId, conversationKey: snapshot.conversationKey, messageHash: hash(cleanAssistantText(assistantEl)), reason: "final_block_seen", confidence: 1, createdAt: Date.now() });
+    bridge.reportSignal?.({ type: "final_ui_seen", taskId: snapshot.taskId, conversationKey: snapshot.conversationKey, messageHash: hash(raw), reason: "strict_final_block_seen", confidence: 1, createdAt: Date.now() });
   }
 
   function foldFinals() {
     installStyle();
     assistantEls().forEach((assistantEl) => {
       if (assistantEl.dataset.safeConfirmFinalProcessed === "true") return;
-      const finalBlock = parseFinal(cleanAssistantText(assistantEl));
+      const raw = cleanAssistantText(assistantEl);
+      const finalBlock = parseFinal(raw);
       if (!finalBlock) return;
       const container = finalContainer(assistantEl);
-      if (container) insertToggle(container, finalBlock, container);
-      else insertToggle(assistantEl, finalBlock, null);
+      insertToggle(container || assistantEl, finalBlock, container);
       assistantEl.dataset.safeConfirmFinalProcessed = "true";
       reportFinalSeen(assistantEl);
     });
-  }
-
-  function signature(raw) {
-    return norm(raw)
-      .replace(/<SCH_FINAL>[\s\S]*?<\/SCH_FINAL>/gi, "")
-      .replace(/任务已完成|已完成|完成了|done|completed|finished|ready_to_stop/gi, "")
-      .replace(/[0-9a-f]{7,40}/gi, "#hash")
-      .replace(/\d+/g, "#")
-      .toLowerCase()
-      .slice(-1200);
-  }
-
-  function similarity(a, b) {
-    const split = (value) => new Set(String(value || "").split(/[^\p{L}\p{N}_]+/u).filter((token) => token.length >= 2).slice(-160));
-    const left = split(a);
-    const right = split(b);
-    if (!left.size || !right.size) return 0;
-    let same = 0;
-    left.forEach((token) => { if (right.has(token)) same += 1; });
-    return same / Math.max(left.size, right.size);
   }
 
   function snapshot() {
@@ -169,38 +191,98 @@
     return !!window.__safeConfirmHelperBridge?.reportSignal?.({ type, taskId: info.taskId, conversationKey: info.conversationKey, messageHash, reason, confidence, createdAt: Date.now() });
   }
 
+  function blockedOrIncomplete(raw) {
+    return /没有全部覆盖|未完成|未覆盖|未验证|未测试|未运行|无法验证|无法确认|不能输出\s*SCH_FINAL|不要输出\s*SCH_FINAL|不能结束|阻塞|失败|被拦截|权限不足|无法访问|不能部署|not complete|incomplete|not verified|not tested|not run|cannot verify|cannot confirm|blocked|failed|permission denied|unable to access|cannot deploy|do not output\s*SCH_FINAL/i.test(String(raw || "")) || /不应视为\s*ready_to_stop|不是\s*ready_to_stop|不能.*ready_to_stop|not\s+ready_to_stop|not.*ready to stop/i.test(String(raw || ""));
+  }
+
+  function auditPrompt(raw) {
+    const value = norm(raw);
+    return /停机前自检|最终自检|原始需求是否全部覆盖|哪些内容只是推测而非验证/.test(value) && /SCH_FINAL/i.test(value);
+  }
+
+  function completionIntent(raw) {
+    return /任务全部完成|已经完成全部|全部要求已完成|可以结束|任务已完成|已完成全部|ready_to_stop/i.test(String(raw || "")) && !blockedOrIncomplete(raw);
+  }
+
+  function rewriteAuditDraft() {
+    const editor = input();
+    if (!editor) return false;
+    const draft = inputText(editor);
+    if (!auditPrompt(draft)) return false;
+    const last = lastAssistantText();
+    if (!last) return false;
+    const targetHash = hash(last);
+    if (lastAuditHash === targetHash) repeatedAuditCount += 1;
+    else repeatedAuditCount = 0;
+    lastAuditHash = targetHash;
+    if (!blockedOrIncomplete(last) && !repeatedAuditCount) return false;
+    if (completionIntent(last) && validFinal(parseFinal(last))) return false;
+    return setInput(editor, UNBLOCK);
+  }
+
+  function signature(raw) {
+    return norm(raw).replace(/<SCH_FINAL>[\s\S]*?<\/SCH_FINAL>/gi, "").replace(/任务已完成|已完成|完成了|done|completed|finished|ready_to_stop/gi, "").replace(/[0-9a-f]{7,40}/gi, "#hash").replace(/\d+/g, "#").toLowerCase().slice(-1200);
+  }
+
   function progressSignals() {
     const info = snapshot();
     if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || !info?.promptInjected || info.conversationKey !== info.pageKey) return;
-    const last = assistantEls().at(-1);
-    const raw = cleanAssistantText(last);
+    const raw = lastAssistantText();
     if (!raw || validFinal(parseFinal(raw))) return;
     const currentHash = hash(raw);
     if (currentHash === lastHash) return;
     const currentSig = signature(raw);
-    const hasRisk = riskHard(raw) || riskWeak(raw);
-    if (lastSig && currentSig && (currentSig === lastSig || currentSig.includes(lastSig) || similarity(lastSig, currentSig) >= 0.88)) staleCount += 1;
+    if (lastSig && currentSig && (currentSig === lastSig || currentSig.includes(lastSig))) staleCount += 1;
     else staleCount = 0;
     lastSig = currentSig;
     lastHash = currentHash;
     const now = Date.now();
-    if (hasRisk && now - lastRiskSignalAt > 30000 && report("risk_word", "assistant_reply_contains_risk_word", currentHash, 0.9)) lastRiskSignalAt = now;
-    if (staleCount >= 2 && now - lastStaleSignalAt > 30000 && report("stale_progress", "assistant_reply_low_progress", currentHash, 0.75)) { lastStaleSignalAt = now; staleCount = 0; }
+    if ((riskHard(raw) || riskWeak(raw) || blockedOrIncomplete(raw)) && now - lastRiskAt > 30000 && report("risk_word", "assistant_reply_contains_unfinished_or_risk_signal", currentHash, 0.9)) lastRiskAt = now;
+    if (staleCount >= 2 && now - lastStaleAt > 30000 && report("stale_progress", "assistant_reply_low_progress", currentHash, 0.75)) { lastStaleAt = now; staleCount = 0; }
   }
 
-  function tick() { tickTimer = 0; foldFinals(); progressSignals(); }
-  function scheduleTick() { if (!tickTimer) tickTimer = setTimeout(tick, 250); }
+  function wrapBridge() {
+    const bridge = window.__safeConfirmHelperBridge;
+    if (!bridge || bridge.__safeConfirmEnhancementWrapped || typeof bridge.reportSignal !== "function") return false;
+    const original = bridge.reportSignal.bind(bridge);
+    bridge.reportSignal = (signal) => {
+      if (signal?.type === "final_ui_seen" && !usableFinal(lastAssistantText())) return false;
+      return original(signal);
+    };
+    bridge.__safeConfirmEnhancementWrapped = true;
+    return true;
+  }
 
-  const observer = new MutationObserver(scheduleTick);
-  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-  intervalId = setInterval(scheduleTick, 2500);
+  function removeUnknownToggles() {
+    document.querySelectorAll(".safe-confirm-final-toggle").forEach((node) => {
+      if (!/unknown/i.test(text(node))) return;
+      const target = node.nextElementSibling;
+      if (target?.getAttribute?.("data-safe-confirm-final-collapsed") === "true" && !usableFinal(text(target))) target.removeAttribute("data-safe-confirm-final-collapsed");
+      node.remove();
+    });
+  }
+
+  function tick() {
+    timer = 0;
+    wrapBridge();
+    removeUnknownToggles();
+    foldFinals();
+    progressSignals();
+    rewriteAuditDraft();
+  }
+  function scheduleTick() { if (!timer) timer = setTimeout(tick, 120); }
+
+  observer = new MutationObserver(scheduleTick);
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-safe-confirm-final-collapsed", "data-safe-confirm-final-processed", "class", "style"] });
+  loop = setInterval(scheduleTick, 2500);
+  document.addEventListener("input", scheduleTick, { capture: true, signal: ac.signal });
   document.addEventListener("visibilitychange", scheduleTick, { signal: ac.signal });
 
   window.__safeConfirmHelperEnhancementsCleanup = () => {
     ac.abort();
-    observer.disconnect();
-    clearInterval(intervalId);
-    clearTimeout(tickTimer);
+    observer?.disconnect();
+    clearInterval(loop);
+    clearTimeout(timer);
     document.getElementById(`${APP_ID}-final-fold-style`)?.remove();
     document.querySelectorAll(".safe-confirm-final-toggle").forEach((el) => el.remove());
     document.querySelectorAll("[data-safe-confirm-final-processed='true']").forEach((el) => {
