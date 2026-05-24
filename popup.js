@@ -8,7 +8,7 @@ verdict: ready_to_stop
 </SCH_FINAL>`;
 const DEFAULT_CONTINUE_PROMPT = `继续执行原始任务，从当前进度后的下一个具体步骤开始。优先处理未完成、未验证或有阻塞风险的部分；不要复述计划，不要阶段性总结，不要只说“任务已完成”。如果发现遗漏、未验证项或阻塞风险，先继续执行或修复。只有确认全部完成且无未验证项、无阻塞风险时，才只输出以下格式，不要添加其他文字：
 ${FINAL_FORMAT}`;
-const CONTENT_SCRIPT_FILES = ["sch-session-scope.js", "content.js", "sch-final-enhancements.js"];
+const CONTENT_SCRIPT_FILES = ["sch-session-scope.js", "content.js"];
 const ids = {
   status: "page-status",
   connectionPill: "connection-pill",
