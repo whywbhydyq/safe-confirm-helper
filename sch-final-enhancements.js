@@ -46,6 +46,13 @@
     return [...new Set([el.getAttribute?.("aria-label"), el.getAttribute?.("title"), el.getAttribute?.("value"), el.textContent, el.innerText].filter(Boolean).map((item) => item.trim()).filter(Boolean))].join(" ").replace(/\s+/g, " ").trim();
   }
 
+  function pageBusy() {
+    const buttons = Array.from(document.querySelectorAll("button,[role='button']")).filter(visible);
+    if (buttons.some((button) => /停止|中止|stop|cancel/i.test(text(button)))) return true;
+    const pageTail = norm(document.body?.innerText || "").slice(-5000);
+    return /连接中断|等待完整回复|正在等待完整回复|正在思考|正在运行|正在生成|正在回复|thinking|running|generating|streaming|reconnecting|connection interrupted/i.test(pageTail);
+  }
+
   function cleanAssistantText(el) {
     if (!el) return "";
     const clone = el.cloneNode(true);
@@ -205,6 +212,9 @@
   }
 
   function rewriteAuditDraft() {
+    if (pageBusy()) return false;
+    const info = snapshot();
+    if (!info?.enabled || !info?.autoContinue || info.sending || info.pausedReason) return false;
     const editor = input();
     if (!editor) return false;
     const draft = inputText(editor);
@@ -226,7 +236,7 @@
 
   function progressSignals() {
     const info = snapshot();
-    if (!info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || !info?.promptInjected || info.conversationKey !== info.pageKey) return;
+    if (pageBusy() || !info?.enabled || !info?.autoContinue || !info?.superviseLongTasks || !info?.taskActive || !info?.promptInjected || info.conversationKey !== info.pageKey) return;
     const raw = lastAssistantText();
     if (!raw || validFinal(parseFinal(raw))) return;
     const currentHash = hash(raw);
