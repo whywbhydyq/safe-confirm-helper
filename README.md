@@ -1,79 +1,93 @@
 # Safe Confirm Helper
 
-Safe Confirm Helper 是一个用于 ChatGPT 网页端的轻量长任务监督插件。
+Safe Confirm Helper 是一个面向 ChatGPT 网页端的轻量长任务监督插件。
 
-它解决的不是“让插件替 AI 验证所有结果”，而是一个更具体的问题：当用户让 ChatGPT 执行长任务、代码修改、仓库维护、部署排查、SEO 扩写或多步骤分析时，AI 很容易在未完成、未验证、存在阻塞或只做了阶段性工作时，就用“任务已完成”“已处理”“done”之类的话提前结束。
+它不试图替 AI 验证所有业务结果，也不把浏览器插件变成复杂的测试器、Agent 平台或仓库自动化系统。它只解决一个明确问题：当用户让 ChatGPT 执行长任务时，AI 经常在任务未完成、未验证、存在阻塞或只有阶段性进展时提前说“任务已完成”。
 
-本插件的核心目标是：让 AI 在停止前必须自检，并且只有输出合格的 `<SCH_FINAL>` 终止块时，插件才停止自动继续。
+Safe Confirm Helper 的目标是让 AI 不能用普通完成话术停机。只有输出合格的 `<SCH_FINAL>` 终止块，插件才停止自动继续。
 
-## 真实需求
+## 当前架构
 
-这个项目的设计前提很明确：插件必须简单、低干扰、少设置，不让用户额外写规则、写断言、写 JSON、配置验证器或理解复杂流程。
-
-用户应该只需要这样使用：
+当前版本采用单控制器架构：
 
 ```text
-1. 打开 ChatGPT 页面
-2. 点击插件里的“开启持续监督”
-3. 回到 ChatGPT，正常输入真实任务
-4. 后续由插件监督 AI 继续、解阻、审计，直到合格终止
+popup.js 只负责 UI、设置、启动和恢复。
+sch-session-scope.js 只负责单标签页 session 隔离。
+content.js 是唯一的任务状态机和自动决策中心。
 ```
 
-插件不追求做一个完整 Agent 平台，也不追求替代 IDE、CI、GitHub Actions、Vercel、Playwright 或人工验收。它只做一件事：约束 ChatGPT 在长任务中不要假完成、不要早停、不要跳过停机前自检。
-
-## 不做复杂验证器
-
-Safe Confirm Helper 不采用这些方案：
+核心决策路径只有一条：
 
 ```text
-不要求用户写 assertions
-不要求用户配置测试规则
-不解析业务仓库结构
-不接管 GitHub / Vercel / 本地文件系统
-不负责判断某个项目是否真的构建成功
-不替用户验证 SEO、部署、域名、广告、账号后台是否全部正确
-不做多 Agent 工作流
-不把插件变成复杂自动化平台
+content.js -> maybeContinue() -> classifyNextAction() -> promptForAction()
 ```
 
-原因很简单：真正的业务正确性只能由 AI 自己执行、工具结果、用户权限和外部系统共同决定。浏览器插件只能看到 ChatGPT 页面局部内容，强行让插件承担业务验证会制造大量误判和副作用。
-
-因此，本插件的边界是：
+已经移除的旧模块：
 
 ```text
-AI 负责执行任务和自我验证。
-插件负责监督 AI 不能跳过验证流程。
-用户负责提供外部权限、账号操作或最终人工判断。
+popup-prompt-boundaries.js
+sch-final-enhancements.js
+```
+
+原因：它们形成了第二控制器和第三份 prompt 来源，可能绕过主状态机直接改输入框、上报低进展信号或维护另一套 UNBLOCK 文案。当前版本不再加载这些脚本，也不保留它们的文件。
+
+## 真实需求边界
+
+本插件必须保持简单、低干扰、少设置。用户不需要写 assertions、JSON、YAML、测试规则或业务验证器。
+
+推荐使用流程：
+
+```text
+1. 打开 ChatGPT 页面。
+2. 点击插件里的“开启持续监督”。
+3. 回到 ChatGPT，正常输入真实任务。
+4. 插件把监督协议追加到这条真实任务后面。
+5. 后续由插件监督 AI 继续、解阻、审计，直到合格终止。
+```
+
+插件不接管 GitHub、Vercel、IDE、本地文件、外部后台或真实业务验收。它只能监督 ChatGPT 页面里的对话行为。
+
+边界划分：
+
+```text
+AI：负责执行任务、调用工具、验证结果、说明证据。
+插件：负责监督 AI 不能早停、不能跳过自检、不能用普通完成话术结束。
+用户：负责外部权限、账号后台、密钥、域名、付款、人工验收等浏览器插件无法代替的事项。
 ```
 
 ## 核心机制
 
-当前版本采用“手动开启监督”的方式，不自动猜测哪条消息是长任务。
+当前版本不自动猜测哪条消息是长任务。必须由用户手动点击“开启持续监督”。
+
+状态流：
 
 ```text
-普通模式
-用户正常聊天，插件只按设置做安全确认和保持底部。
+idle
+未开启监督。
 
-点击“开启持续监督”
-插件进入 armed 待命状态，只接管当前标签页的下一条真实任务。
+armed
+用户点击“开启持续监督”，插件进入待命。此时不审计旧回复，不自动继续。
 
-用户发送真实任务
-插件自动追加 SafeConfirm Supervision 协议。
+supervising
+用户发送真实任务后，插件追加 SafeConfirm Supervision 协议，开始监督。
 
-AI 执行任务
-插件观察最后一条 assistant 回复。
+continuing
+没有合格 Final，插件要求 AI 从当前进度继续。
 
-未完成 / 未验证 / 阻塞 / 工具失败
-插件优先发送解阻继续提示，不反复要求最终自检。
+unblocking
+AI 明确说未完成、未验证、失败、被拦截或存在阻塞，插件要求 AI 把阻塞转成下一步行动。
 
-疑似完成 / 到达审计间隔 / 出现 Final
-插件要求 AI 做停机前自检。
+auditing
+AI 疑似完成、出现 Final、或到达审计间隔，插件要求做停机前自检。
 
-合格 <SCH_FINAL>
-插件停止自动继续。
+paused_blocked
+AI 连续说明必须用户外部操作才能继续，插件暂停并等待用户。
+
+stopped_valid_final
+检测到合格 <SCH_FINAL>，插件停止自动继续。
 ```
 
-最关键的是：点击“开启持续监督”不会立刻发送审计提示，也不会根据页面历史回复判断任务状态。它只是让插件等待下一条真实任务。
+点击“开启持续监督”不会立刻发送提示，也不会审计页面历史回复。它只进入 `armed`，等待下一条真实任务。
 
 ## 合格停止条件
 
@@ -93,209 +107,141 @@ verdict: ready_to_stop
 必须同时满足：
 
 ```text
-status 必须是 done
-covered 必须说明覆盖了哪些原始需求
-proof 必须说明完成证据
-unverified 必须是 none / 无 / 没有等空值
-risks 必须是 none / 无 / 没有等空值
-verdict 必须包含 ready_to_stop
+status 必须是 done。
+covered 必须说明覆盖了哪些原始需求。
+proof 必须说明完成证据。
+unverified 必须是 none / 无 / 没有等空值。
+risks 必须是 none / 无 / 没有等空值。
+verdict 必须包含 ready_to_stop。
 ```
 
-这些内容不会让插件停止：
+这些内容不能让插件停止：
 
 ```text
 任务已完成
 已完成
 done
+completed
 finished
-ready_to_stop 的普通文本
+普通文本 ready_to_stop
 裸 SCH_FINAL 字样
 不完整 Final 块
 缺字段 Final 块
 unverified 非空
 risks 非空
-Final 中出现“可能、应该、未验证、未测试、无法确认”等风险词
-AI 明确说不能输出 SCH_FINAL
-AI 明确说任务未完成或存在阻塞
+AI 明确说任务未完成、未验证、未测试、失败、被拦截或不能输出 SCH_FINAL
 ```
 
-## 继续、解阻、审计的优先级
+## 继续、解阻、审计优先级
 
-插件不是一看到 `SCH_FINAL` 或“完成”就审计。当前优先级是：
+主状态机的优先级应保持如下：
 
 ```text
-1. 如果出现合格 <SCH_FINAL>，停止。
-2. 如果 AI 明确说未完成、未验证、失败、被拦截、权限不足、不能部署、不能 push、不能输出 SCH_FINAL，优先解阻继续。
-3. 如果 AI 连续说明必须用户外部操作才能继续，暂停并提示用户处理。
-4. 如果 AI 表达完成、出现不合格 Final、或达到审计间隔，触发最终自检。
-5. 其他情况继续推进原始任务。
+1. 合格 <SCH_FINAL> -> stop。
+2. 明确未完成、未验证、失败、权限不足、阻塞 -> unblock。
+3. 连续需要用户外部操作 -> pause。
+4. 疑似完成、不合格 Final、审计间隔到达 -> audit。
+5. 其他情况 -> continue。
 ```
 
-这条优先级很重要。插件不能把“我还没完成，不能输出 SCH_FINAL”误判成 Final，也不能让 AI 在明显阻塞时反复做停机前自检。
+重要原则：`blocked / incomplete` 的优先级必须高于 `audit`。AI 说“我还不能输出 SCH_FINAL”时，插件应该推动继续或换路径，而不是反复要求最终自检。
 
-## 运行态保护
+## 当前关键边界
 
-插件不能在 ChatGPT 仍在生成、重连或等待完整回复时抢跑。
+### 1. completionIntent 不能裸匹配英文单词
 
-当前会识别这些 busy 状态：
+维护时不要把 `done`、`completed`、`finished` 这种裸英文单词作为完成意图。它们可能出现在代码、日志、commit message 或测试输出里。
+
+应使用上下文短语：
 
 ```text
-正在思考
-正在生成
-正在运行
-正在回复
-停止按钮可见
-连接中断
-等待完整回复
-reconnecting
-connection interrupted
-thinking / running / generating / streaming
+ready_to_stop
+ready to stop
+task completed
+task is complete
+all requirements completed
 ```
 
-在这些状态下，插件不会改写输入框，不会把审计草稿改成解阻提示，也不会把未完成的流式回复当成稳定结果。
+中文完成表达可以保留：
+
+```text
+任务全部完成
+已经完成全部
+全部要求已完成
+可以结束
+任务已完成
+已完成全部
+```
+
+### 2. Final gate 不应扫描整个 raw 的弱风险词
+
+`unverified` 必须为空，`risks` 必须为空或等价空值。`risks` 字段里的弱风险词应拒绝停止。
+
+但不要对整个 Final raw 做弱风险扫描。`covered` 或 `proof` 中可能自然出现“如果 / should / likely / might”等词，不能因此误拒一个合格 Final。
+
+推荐策略：
+
+```text
+status、verdict、unverified、risks 仍严格。
+risks 字段继续查 weakRisk。
+硬阻塞词可以查 proof + unverified + risks。
+不要对 finalBlock.raw 全局 weakRisk。
+```
+
+### 3. stale_progress 不应触发自动 unblock
+
+旧增强脚本曾根据文本相似度上报 `stale_progress`。这个判断容易误伤长任务中自然重复的文件名、约束和验证说明。
+
+当前版本已删除外部增强脚本。后续维护也不应恢复 `stale_progress -> unblock`。
+
+### 4. popup 不直接写 ChatGPT 输入框
+
+popup 只能发送设置、启动监督、暂停/恢复、手动确认或轻量滚动请求。真正写输入框和发提示的逻辑只能在 `content.js` 主状态机里。
+
+### 5. session 隔离不能删除
+
+`sch-session-scope.js` 用于避免 A 标签页开启监督后污染 B 标签页。它只隔离任务 session，不隔离全局设置。除非有更好的 tab-scoped 存储方案，否则不要删除。
 
 ## 保持底部逻辑
 
-保持底部是这个插件的重要体验功能，因为长任务监督必须持续观察最新 assistant 回复。
+普通模式下，保持底部由用户开关决定。
 
-规则如下：
+监督开启后，保持底部临时强制开启，因为插件必须持续观察最新 assistant 回复。
 
-```text
-普通模式：保持底部可以开，也可以关。
-开启监督后：保持底部临时强制开启，并在弹窗中锁定。
-监督停止、重置或完成后：恢复普通模式，用户原本的偏好不被永久覆盖。
-用户主动点击“保持底部”：立即滚到底部。
-用户主动点击“开启持续监督”或“恢复自动继续”：立即滚到底部。
-用户手动往上滚动阅读：后台自动滚动会暂停一段时间，避免抢回视图。
-```
+用户主动点击“保持底部”“开启持续监督”或“恢复自动继续”时，应立即滚到底部，不能等轮询。用户手动往上滚动阅读时，后台自动滚动应暂停一段时间，避免抢回视图。
 
-也就是说：后台自动滚动尊重用户阅读；但用户主动打开保持底部时，必须立即到底部，不能等轮询。
-
-## 单标签页隔离
-
-监督状态必须只属于当前 ChatGPT 标签页。
-
-如果用户在 A 标签页点击“开启持续监督”，B 标签页不应自动进入同一个监督任务，也不应共享 A 页的任务状态。当前通过 `sch-session-scope.js` 把任务 session 映射到 tab-local key，避免多标签页串扰。
-
-这也是插件的产品边界：它不是全局任务管理器，而是“当前页面、当前对话、当前长任务”的监督器。
-
-## 弹窗行为
-
-主按钮根据状态自动变化：
-
-```text
-普通模式 -> 开启持续监督
-监督待命 -> 暂停自动继续
-监督中 -> 暂停自动继续
-已暂停 -> 恢复自动继续
-已完成 -> 重新开启持续监督
-```
-
-设置区默认展开，不需要每次点“高级设置”。
-
-主要开关含义：
-
-```text
-插件总开关
-关闭后停止全部自动行为。
-
-长任务监督
-允许插件接管当前页下一条真实任务。
-
-自动继续
-控制是否自动发送继续、解阻或审计提示。
-
-安全确认
-只自动点击 ChatGPT 弹窗内匹配的确认类按钮。
-
-保持底部
-普通模式可自选；监督期间临时强制开启。
-```
+当前 `popup-scroll-now.js` 是弹窗侧即时滚动辅助。它不参与任务判断，也不改输入框。后续可以改为给 `content.js` 发送 `scroll-bottom-now` 消息，由 `content.js` 统一执行滚动。
 
 ## 自动确认按钮
 
-插件保留安全确认辅助能力，用于减少 ChatGPT 工具调用中的重复确认。
+安全确认辅助能力保留，用于减少 ChatGPT 工具调用中的重复确认。
 
-可识别按钮包括：
+可识别：
 
 ```text
 确认 / 允许 / 继续 / 批准
 Confirm / Allow / Continue / Approve / Accept
 ```
 
-自动点击只应发生在可见、可用、匹配的确认按钮上。插件不会绕过确认流程，也不会点击页面上不匹配的普通按钮。
+自动点击只应发生在可见、可用、匹配的确认按钮上。插件不能绕过确认流程，也不能点击不匹配的普通页面按钮。
 
-## 典型使用场景
-
-适合：
+## 文件说明
 
 ```text
-让 ChatGPT 长时间修改仓库
-让 ChatGPT 分阶段做 SEO / 内容扩写
-让 ChatGPT 排查构建或部署问题
-让 ChatGPT 执行多文件重构
-让 ChatGPT 做长篇研究、总结和交叉验证
-让 ChatGPT 在工具失败后换路径继续推进
-```
+manifest.json
+Chrome MV3 配置。当前只加载 sch-session-scope.js 和 content.js。
 
-不适合：
+content.js
+唯一任务状态机。负责任务状态、监督协议注入、SCH_FINAL 解析、停止门控、自动继续、解阻、审计、保持底部、安全确认和状态持久化。
 
-```text
-要求插件证明生产环境一定正确
-要求插件自动登录第三方后台
-要求插件替用户提交 GitHub / Vercel 操作
-要求插件读取本地 IDE 文件
-要求插件成为通用浏览器自动化机器人
-```
+sch-session-scope.js
+单标签页 session 隔离。必须在 content.js 前加载。
 
-## 提示词设计边界
+popup.html / popup.css / popup.js
+扩展弹窗 UI。负责显示状态、切换设置、启动监督、暂停/恢复。popup 不直接写 ChatGPT 输入框。
 
-SafeConfirm 的监督提示词应该强调：不要假完成，不要早停，未完成就继续，停止前必须自检。
-
-但它不应该无限放大“继续推进”。正确边界是：
-
-```text
-继续推进，但不能破坏用户已设定的工程约束。
-当继续推进和工程约束冲突时，先保工程约束。
-当缺少外部权限时，说明需要用户做什么。
-当无法直接提交或部署时，优先交付 patch、脚本、文件包、命令和验证清单。
-不要为了完成而制造碎片提交、误触发部署、污染仓库历史或虚构验证结果。
-```
-
-这类边界尤其适用于 GitHub / Vercel / AdSense / 域名 / Search Console 等跨系统任务。
-
-## 状态模型
-
-```text
-idle
-未开启监督。
-
-armed
-已点击“开启持续监督”，等待用户发送下一条真实任务。
-
-supervising
-真实任务已发送，监督协议已注入。
-
-continuing
-没有合格 Final，插件要求 AI 从当前进度继续。
-
-auditing
-插件要求 AI 做停机前自检。
-
-unblocking
-AI 声明未完成、未验证、失败或阻塞，插件要求它把阻塞转为下一步行动。
-
-paused_blocked
-AI 连续声明必须用户外部操作才能继续，插件暂停。
-
-paused_max_continue
-达到最大自动继续次数，插件暂停。
-
-paused_send_failed / paused_composer_failed
-发送或输入框写入连续失败，插件暂停。
-
-stopped_valid_final
-检测到合格 <SCH_FINAL>，插件停止自动继续。
+popup-scroll-now.js
+弹窗侧即时滚动辅助。只做滚动，不做任务判断。
 ```
 
 ## 安装方式
@@ -313,40 +259,18 @@ chrome://extensions/
 
 更新代码后必须重新加载扩展，并刷新所有已打开的 ChatGPT 页面。旧页面不会自动运行新的 content script。
 
-## 文件说明
-
-```text
-manifest.json
-Chrome MV3 配置。当前版本为 2.3.0，并按顺序加载 sch-session-scope.js、content.js、sch-final-enhancements.js。
-
-content.js
-核心页面脚本。负责任务状态、监督协议注入、严格 SCH_FINAL 门控、自动继续、解阻、审计、保持底部、安全确认和状态持久化。
-
-sch-session-scope.js
-单标签页 session 隔离脚本。必须在 content.js 前加载。
-
-sch-final-enhancements.js
-增强脚本。负责 Final 折叠展示、页面风险信号、busy guard 和审计草稿保护。不负责保持底部。
-
-popup.html / popup.css / popup.js
-扩展弹窗 UI。负责显示状态、切换设置、启动监督和暂停/恢复。
-
-popup-scroll-now.js
-弹窗侧即时滚动辅助。用户点击保持底部、开启监督或恢复自动继续时，立即让当前 ChatGPT 页面滚到底部。
-```
-
 ## 维护原则
-
-后续修改应遵守这些原则：
 
 ```text
 保持简单，不引入复杂验证器。
-核心自动行为集中在 content.js。
-增强脚本只做 UI 增强和轻量信号，不接管主状态机。
-popup 不直接写 ChatGPT 输入框，只发送设置或轻量页面动作。
+核心自动行为只能集中在 content.js。
+不得恢复第二控制器脚本。
+popup 不直接写 ChatGPT 输入框。
 所有 Final 解析必须严格要求 <SCH_FINAL>...</SCH_FINAL>。
 blocked / incomplete 优先级必须高于 invalid final / audit。
-保持底部只能有一套主实现，避免双实现互相误判滚动状态。
+不要裸匹配 done / completed / finished。
+不要让 stale_progress 触发自动 unblock。
+不要对整个 Final raw 做 weakRisk。
 监督状态必须单标签页隔离。
 不要把插件能力描述成业务验证能力。
 ```
